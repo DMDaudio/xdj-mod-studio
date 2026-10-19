@@ -90,10 +90,11 @@ def _():
 
 @check("deck installer plans (no deck needed)")
 def _():
+    # (PERFORM pads need pad art from the user's own firmware: not here)
     import rgb_overview as RO
-    import perform_pads as PP          # noqa: F401  (assembles with shasm)
-    import mysettings as MS            # noqa: F401
-    return f"overview mode byte @ {RO.MODE_ADDR:#x}"
+    import vredirect as VR
+    n = len(VR.plan())
+    return f"overview mode byte @ {RO.MODE_ADDR:#x}, versions plan {n} bytes"
 
 
 @check("firmware home")
