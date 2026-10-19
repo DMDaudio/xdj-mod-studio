@@ -1,0 +1,142 @@
+<!doctype html><html><head><meta charset="utf-8"><title>XDJ-700 Mod Studio</title>
+<style>
+:root{--bg:#131317;--pan:#1b1b21;--pan2:#212129;--line:#2e2e38;--tx:#e9e9f0;--dim:#8e8e9c;--acc:#7c5cd6;--ok:#4ec98a;--bad:#e2555f;--warn:#e0a33c}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{padding:14px 20px;border-bottom:1px solid var(--line);display:flex;align-items:baseline;gap:14px;flex-wrap:wrap}
+h1{font-size:16px;margin:0;font-weight:600}
+.sub{color:var(--dim);font-size:12px}
+.wrap{display:grid;grid-template-columns:308px 1fr;gap:0;min-height:calc(100vh - 52px)}
+.side{border-right:1px solid var(--line);padding:16px;overflow:auto}
+.main{padding:18px 22px;overflow:auto}
+h2{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--dim);margin:20px 0 9px;font-weight:600}
+h2:first-child{margin-top:0}
+.themes{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+button.t{background:var(--pan);border:1px solid var(--line);color:var(--tx);padding:7px 6px;border-radius:6px;cursor:pointer;font-size:12px;text-align:left;display:flex;align-items:center;gap:6px}
+button.t:hover{border-color:#45455a}
+button.t.on{border-color:var(--acc);background:#231f36}
+.sw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(255,255,255,.18)}
+label.r{display:block;margin:11px 0 3px;font-size:12px;color:var(--dim);display:flex;justify-content:space-between}
+label.r b{color:var(--tx);font-weight:500;font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--acc)}
+input[type=text]{width:100%;background:var(--pan);border:1px solid var(--line);color:var(--tx);padding:7px 9px;border-radius:6px;font-size:13px}
+.go{width:100%;margin-top:14px;background:var(--acc);border:0;color:#fff;padding:11px;border-radius:7px;font-size:14px;font-weight:600;cursor:pointer}
+.go:disabled{opacity:.5;cursor:default}
+.card{background:var(--pan);border:1px solid var(--line);border-radius:9px;padding:14px;margin-bottom:16px}
+.assets{display:flex;gap:16px;flex-wrap:wrap}
+.asset figcaption{color:var(--dim);font-size:11px;margin-top:6px;font-family:ui-monospace,Menlo,monospace}
+.asset img,.screen img{border-radius:5px;display:block;image-rendering:pixelated;max-width:100%}
+.screen img{image-rendering:auto;border:1px solid var(--line)}
+.note{color:var(--warn);font-size:11.5px;margin-top:8px}
+pre{background:#0e0e12;border:1px solid var(--line);border-radius:7px;padding:11px;font:11.5px/1.65 ui-monospace,Menlo,monospace;white-space:pre-wrap;max-height:270px;overflow:auto;margin:0}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.pill{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;background:var(--pan2);color:var(--dim);border:1px solid var(--line)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+@media(max-width:1100px){.grid2{grid-template-columns:1fr}.wrap{grid-template-columns:1fr}.side{border-right:0;border-bottom:1px solid var(--line)}}
+</style></head><body>
+<header><h1>XDJ-700 Mod Studio</h1>
+<span class="sub" id="meta"></span>
+<span class="pill" id="pxl"></span></header>
+<div class="wrap">
+<div class="side">
+  <h2>Theme</h2><div class="themes" id="themes"></div>
+  <h2>Adjust</h2>
+  <label class="r">Hue <b id="lh"></b></label><input type="range" id="hue" min="0" max="359" step="1">
+  <label class="r">Saturation <b id="ls"></b></label><input type="range" id="sat" min="0" max="2" step="0.05">
+  <label class="r">Brightness <b id="lv"></b></label><input type="range" id="val" min="0.4" max="1.6" step="0.02">
+  <label class="r">Spread <b id="lp"></b></label><input type="range" id="spread" min="0" max="1" step="0.05">
+  <h2>Modifiers</h2>
+  <label class="r">Version header</label>
+  <input type="text" id="version" placeholder="leave blank to keep 1.15">
+  <div class="note" id="vnote" style="display:none"></div>
+  <label class="r" style="margin-top:12px">Output name</label>
+  <input type="text" id="name" value="custom">
+  <button class="go" id="build">Build .UPD</button>
+</div>
+<div class="main">
+  <div class="card"><h2 style="margin-top:0">Firmware assets — real, decoded from XDJ700.UPD</h2>
+    <div class="assets" id="assets"></div></div>
+  <div class="grid2">
+    <div class="card"><h2 style="margin-top:0">Screen preview</h2>
+      <div class="screen" id="screen"></div>
+      <div class="note">SIMULATION — mock-up layout with the real colour transform. Not a photograph, and not firmware output.</div>
+    </div>
+    <div class="card"><h2 style="margin-top:0">Build log</h2>
+      <pre id="log">Pick a theme, adjust, then Build.
+
+Every build is verified before it is written:
+  · encoder round-trip asserted
+  · both block checksums recomputed
+  · rebuilt block decoded and compared to the intended edit
+  · PANL confirmed untouched
+A file that fails any check is not written.</pre>
+      <div class="note">Nothing here has been tested on hardware. Do not flash to a deck you cannot afford to lose.</div>
+    </div>
+  </div>
+</div></div>
+<script>
+let T={},cur='purple',S={hue:280,sat:1.15,val:1,spread:.5},mode='theme',timer=null;
+const $=i=>document.getElementById(i);
+function hsl(h,s,v){return `hsl(${h},${Math.min(100,s*55)}%,${Math.min(70,v*45)}%)`}
+async function init(){
+  const r=await (await fetch('/api/themes')).json(); T=r.themes;
+  $('meta').textContent=`${r.stock.split('/').pop()} · ${r.decoded.toLocaleString()} B decoded · ${r.art.toLocaleString()}/${r.windows.toLocaleString()} art windows`;
+  const c=$('themes');
+  for(const k in T){
+    const b=document.createElement('button');b.className='t'+(k===cur?' on':'');b.dataset.k=k;
+    const sw=document.createElement('span');sw.className='sw';
+    sw.style.background=T[k]?hsl(T[k].hue,T[k].sat,T[k].val):'#2b3b52';
+    b.appendChild(sw);b.appendChild(document.createTextNode(k));
+    b.onclick=()=>pick(k);c.appendChild(b);
+  }
+  pick(cur);
+}
+function pick(k){
+  cur=k;mode=T[k]?'theme':'stock';
+  document.querySelectorAll('button.t').forEach(b=>b.classList.toggle('on',b.dataset.k===k));
+  if(T[k])S={...T[k]};
+  $('name').value=k;
+  sync();refresh();
+}
+function sync(){
+  $('hue').value=S.hue;$('sat').value=S.sat;$('val').value=S.val;$('spread').value=S.spread;
+  $('lh').textContent=Math.round(S.hue)+'°';$('ls').textContent=(+S.sat).toFixed(2);
+  $('lv').textContent=(+S.val).toFixed(2);$('lp').textContent=(+S.spread).toFixed(2);
+}
+['hue','sat','val','spread'].forEach(id=>$(id).addEventListener('input',e=>{
+  S[id]=parseFloat(e.target.value);mode='theme';
+  document.querySelectorAll('button.t').forEach(b=>b.classList.remove('on'));
+  sync();clearTimeout(timer);timer=setTimeout(refresh,150);
+}));
+$('version').addEventListener('input',e=>{
+  const v=e.target.value.trim(),n=$('vnote');
+  if(!v){n.style.display='none';return}
+  n.style.display='block';
+  n.textContent=/^\d+\.\d\d$/.test(v)
+    ?'A deck refuses firmware older than what it runs. Untested — this changes what the updater is told, nothing else.'
+    :'Expected form is x.yz, e.g. 1.16.';
+});
+async function refresh(){
+  const q=new URLSearchParams({mode,...S});
+  const r=await (await fetch('/api/preview?'+q)).json();
+  $('pxl').textContent=r.pixels.toLocaleString()+' px recoloured';
+  $('assets').innerHTML=r.assets.map(a=>
+    `<figure class="asset" style="margin:0"><img src="${a.img}"><figcaption>${a.label}</figcaption></figure>`).join('');
+  $('screen').innerHTML=r.screen?`<img src="${r.screen}">`:'<i>sim/classic-blue.png not found</i>';
+}
+$('build').onclick=async()=>{
+  const b=$('build');b.disabled=true;b.textContent='Building…';
+  $('log').textContent='starting…\n';
+  const r=await (await fetch('/api/build',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({mode,...S,name:$('name').value.trim()||'custom',version:$('version').value})})).json();
+  const poll=setInterval(async()=>{
+    const j=await (await fetch('/api/job?id='+r.id)).json();
+    $('log').innerHTML=j.log.map(l=>l.startsWith('ERROR')||l.includes('BAD')
+      ?`<span class="bad">${l}</span>`:(l.includes('OK')||l.includes('True')?`<span class="ok">${l}</span>`:l)).join('\n');
+    if(j.state!=='running'){
+      clearInterval(poll);b.disabled=false;b.textContent='Build .UPD';
+      if(j.state==='done')$('log').innerHTML+=`\n<span class="ok">wrote ${j.out} (${j.size.toLocaleString()} B)</span>`;
+    }
+  },700);
+};
+init();
+</script></body></html>

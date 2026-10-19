@@ -1,0 +1,192 @@
+/* ts.c -- on-deck theme SWITCHING for the XDJ-700 (RAM only, deck C).
+ *
+ * Every theme is a bijection S -> D_t over the artwork colours (built on
+ * the Mac by tools/theme_switch.py with the same colour maths as the
+ * Studio preview), so switching CUR -> TARGET is exact in both directions:
+ * a pixel holding FROM[i] becomes TO[i], where FROM/TO = S (stock) or the
+ * theme's D list. Nothing else in RAM is touched: only pixels inside the
+ * artwork regions, and only colours in FROM.
+ *
+ * Blob (TS_DATA, LE, written once by the installer):
+ *   +0  "XTSW"  +4 nreg  +8 ns  +12 nt
+ *   +16 reg_off +20 s_off +24 d_off +28 name_off   (offsets from TS_DATA)
+ *   +32 u8 cur  +33 u8 target  +34 u8 busy  +35 pad  +36 u32 nswitch
+ *   +40 hash_off  +44 chunk (pixels per fingerprint)  +48 nskipped
+ *   +52 tbits_off (1 bit per chunk: chunk holds theme colours)
+ *   regions {u32 addr, u32 pixels}, S u16[ns] ascending,
+ *   D u16[nt][ns] (S order), names char[nt][16] (UPPER, NUL-padded),
+ *   chunk bitmap, hashes u32[] (one per THEMABLE chunk, in order)
+ * SAFETY: the firmware reuses some image memory for live data at runtime
+ * (seen: 8 KB blocks at 0x087E0000.. holding play-HISTORY records). So a
+ * chunk is recoloured ONLY if its pixels, mapped back to stock colours,
+ * match the stock fingerprint computed on the Mac; anything the firmware
+ * wrote makes the chunk skip, untouched (counted in nskipped).
+ * Called from the MY SETTINGS [THEME] push (tools/mysettings.py): ts_push()
+ * steps OFF -> theme 1 -> ... -> theme nt -> OFF, recolours at once, and
+ * writes the row text into MSTNAME (+ MSTAPP = 1 so the row shows it).
+ */
+typedef unsigned char u8;
+typedef unsigned short u16;
+typedef unsigned int u32;
+
+#ifndef TS_DATA
+#error TS_DATA
+#endif
+#ifndef MSTNAME
+#error MSTNAME
+#endif
+#ifndef MSTAPP
+#error MSTAPP
+#endif
+
+struct hdr {
+    u32 magic, nreg, ns, nt;
+    u32 reg_off, s_off, d_off, name_off;
+    u8 cur, target, busy, pad;
+    u32 nswitch, hash_off, chunk, nskipped, tbits_off;
+};
+
+#define MAXS 2048
+static u16 frm[MAXS], to[MAXS], stk[MAXS];
+static u32 bits[2048];                  /* 65536-bit "colour is in FROM" */
+/* 2026-10-18 diag: start address of the first 32 chunks the stock-
+ * fingerprint guard skipped (deck shows half-themed buttons the emulator
+ * doesn't): read with tools/theme_skips.py after a [THEME] push */
+u32 ts_skiplog[32];
+
+static inline void wb(u32 a)            /* D-cache line write-back */
+{
+    __asm__ volatile("ocbwb @%0" : : "r"(a) : "memory");
+}
+
+static void build(struct hdr *h)
+{
+    u8 *base = (u8 *)h;
+    const u16 *S = (const u16 *)(base + h->s_off);
+    const u16 *D = (const u16 *)(base + h->d_off);
+    const u16 *F = h->cur ? D + (h->cur - 1) * h->ns : S;
+    const u16 *T = h->target ? D + (h->target - 1) * h->ns : S;
+    u32 n = h->ns, i, j, gap;
+    for (i = 0; i < n; i++) {
+        frm[i] = F[i];
+        to[i] = T[i];
+        stk[i] = S[i];
+    }
+    for (gap = n / 2; gap; gap /= 2)    /* shell sort pairs by FROM */
+        for (i = gap; i < n; i++) {
+            u16 f = frm[i], t = to[i], k = stk[i];
+            for (j = i; j >= gap && frm[j - gap] > f; j -= gap) {
+                frm[j] = frm[j - gap];
+                to[j] = to[j - gap];
+                stk[j] = stk[j - gap];
+            }
+            frm[j] = f;
+            to[j] = t;
+            stk[j] = k;
+        }
+    for (i = 0; i < 2048; i++)
+        bits[i] = 0;
+    for (i = 0; i < n; i++)
+        bits[frm[i] >> 5] |= 1u << (frm[i] & 31);
+}
+
+static inline u32 find(u32 n, u16 v)     /* index of v in frm (present) */
+{
+    u32 lo = 0, hi = n;
+    while (lo < hi) {
+        u32 mid = (lo + hi) >> 1;
+        if (frm[mid] < v)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+#define IN(v) (bits[(v) >> 5] & (1u << ((v) & 31)))
+
+static void recolour(struct hdr *h)
+{
+    const u32 *reg = (const u32 *)((u8 *)h + h->reg_off);
+    const u32 *hash = (const u32 *)((u8 *)h + h->hash_off);
+    const u8 *tb = (const u8 *)h + h->tbits_off;
+    u32 n = h->ns, r, c = 0;
+    for (r = 0; r < h->nreg; r++) {
+        u16 *p0 = (u16 *)reg[2 * r], *end = p0 + reg[2 * r + 1];
+        while (p0 < end) {
+            u16 *p, *e = p0 + h->chunk;
+            u32 hv = 0x811C9DC5u, a;
+            if (e > end)
+                e = end;
+            if (!(tb[c >> 3] & (1u << (c & 7)))) {   /* nothing to theme */
+                c++;
+                p0 = e;
+                continue;
+            }
+            c++;
+            for (p = p0; p < e; p++) {      /* fingerprint in stock colours */
+                u16 v = *p;
+                if (IN(v))
+                    v = stk[find(n, v)];
+                hv = (hv ^ v) * 0x01000193u;
+            }
+            if (hv == *hash++) {
+                for (p = p0; p < e; p++) {
+                    u16 v = *p;
+                    if (IN(v))
+                        *p = to[find(n, v)];
+                }
+                for (a = (u32)p0 & ~31u; a < (u32)e; a += 32)
+                    wb(a);                   /* display/2DG read RAM */
+            } else {
+                if (h->nskipped < 32)
+                    ts_skiplog[h->nskipped] = (u32)p0;
+                h->nskipped++;
+            }
+            p0 = e;
+        }
+    }
+}
+
+static void label(struct hdr *h)
+{
+    volatile u8 *dst = (volatile u8 *)MSTNAME;
+    const u8 *src = h->target
+        ? (const u8 *)h + h->name_off + 16 * (h->target - 1)
+        : (const u8 *)"OFF";
+    u32 i;
+    for (i = 0; i < 15 && src[i]; i++)
+        dst[i] = src[i];
+    for (; i < 16; i++)
+        dst[i] = 0;
+    *(volatile u8 *)MSTAPP = 1;
+}
+
+/* apply h->target now (no-op when already there) */
+void ts_apply(void)
+{
+    struct hdr *h = (struct hdr *)TS_DATA;
+    if (h->magic != 0x57535458u || h->busy || h->ns > MAXS)
+        return;
+    if (h->target > h->nt)
+        h->target = 0;
+    if (h->target != h->cur) {
+        h->busy = 1;
+        build(h);
+        recolour(h);
+        h->cur = h->target;
+        h->nswitch++;
+        h->busy = 0;
+    }
+    label(h);
+}
+
+/* [THEME] push: next theme (wraps through OFF) */
+void ts_push(void)
+{
+    struct hdr *h = (struct hdr *)TS_DATA;
+    if (h->magic != 0x57535458u || h->busy)
+        return;
+    h->target = (u8)((h->cur + 1) % (h->nt + 1));
+    ts_apply();
+}
