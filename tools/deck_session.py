@@ -111,6 +111,9 @@ def run(args, show=("RESULT", "FAIL", "REFUSED", "pacing", "Timeout",
     return out
 
 
+POWER = ' Switch the XDJ-700 OFF and ON, wait for its home screen, then install again (once).'
+
+
 def bad(out):
     return any(s in out for s in ("FAIL", "Timeout", "Traceback",
                                   "found 0 shell"))
@@ -178,6 +181,12 @@ def main():
     import rgb_overview as RO
     t0 = time.time()
 
+    print("0b  checking the deck: firmware 1.15, no earlier mods in memory", flush=True)
+    out = run(["tools/deck_check.py"], show=("RESULT", "STOP", "differs", "re-pointed"))
+    if "RESULT: PASS" not in out:
+        stop = [l.strip() for l in out.splitlines() if l.strip().startswith("STOP")]
+        sys.exit(stop[-1] if stop else "STOP: couldn't read the deck over USB." + POWER)
+
     if not a.skip_survey:
         print("1/5 read-only survey of the snapshot area")
         end = RO.SLOT5 + RO.SLOT5_MAX
@@ -195,12 +204,12 @@ def main():
         for grp in ([ranges] if seen else [[r] for r in ranges]):
             out = run(["tools/deck_zero_survey.py"] + grp)
             if out.count("ALL ZERO") < len(grp):
-                sys.exit("STOP: snapshot area not empty on this deck (or "
-                         "no link) - nothing installed; tell Claude.")
+                sys.exit("STOP: safety check failed (memory not empty, or the USB "
+                         "link dropped) - nothing installed." + POWER)
     print(f"2/5 waveform overview ({a.mode}) + snapshot routine")
     r = until_pass(["tools/rgb_overview_apply.py", a.mode], "overview")
     if r is not True:
-        sys.exit("STOP: overview install failed - power-cycle the deck.")
+        sys.exit("STOP: overview install failed - switch the deck off and on, then install again (once).")
     print("2b  read-only survey of the version-switch + settings code area")
     import vredirect as VR
     import mysettings as MSET
@@ -210,8 +219,8 @@ def main():
                f"{VR.VCAVE:x}:{MSET.MSEND - VR.VCAVE:x}",
                f"{PP.PC0:x}:{PP.PEND - PP.PC0:x}"])
     if "ALL ZERO" not in out or "nonzero" in out.lower():
-        sys.exit("STOP: mod code area not empty on this deck - nothing "
-                 "more installed; tell Claude.")
+        sys.exit("STOP: safety check of the mod area failed (memory not "
+                 "empty, or the USB link dropped) - nothing more installed." + POWER)
     print("4/5 EJECT THE USB STICK from the deck now (no track loaded).")
     print("    Waiting for the deck to report no track ...", flush=True)
     while True:
@@ -223,22 +232,22 @@ def main():
         print("5/5 centre waveform")
         r = until_pass(["tools/rgb_detail_apply.py"], "centre")
         if r is not True:
-            sys.exit("STOP: centre install failed - power-cycle the deck.")
+            sys.exit("STOP: centre install failed - switch the deck off and on, then install again (once).")
     print("5b  stems version switching (per-stem deck file) -- always on")
     r = until_pass(["tools/vredirect_apply.py"], "versions")
     if r is not True:
-        sys.exit("STOP: version-switch install failed - power-cycle the deck.")
+        sys.exit("STOP: version-switch install failed - switch the deck off and on, then install again (once).")
     print("5c  MY SETTINGS rows")
     r = until_pass(["tools/mysettings_apply.py"], "settings")
     if r is not True:
-        sys.exit("STOP: settings install failed - power-cycle the deck.")
+        sys.exit("STOP: settings install failed - switch the deck off and on, then install again (once).")
     if a.no_pads:
         print("5d  PERFORM pads skipped (not selected)")
     else:
         print("5d  PERFORM pads (keep the PERFORM screen closed)")
         r = until_pass(["tools/perform_pads_apply.py"], "perform")
         if r is not True:
-            sys.exit("STOP: PERFORM pads install failed - power-cycle the deck.")
+            sys.exit("STOP: PERFORM pads install failed - switch the deck off and on, then install again (once).")
         if a.no_hotcues:
             print("5f  8 hot cue pages skipped (not selected)")
         else:
@@ -253,21 +262,21 @@ def main():
             print("5g  live stems (PERFORM > STEMS mutes / solos STEMS files)")
             r = until_pass(["tools/stems_apply.py"], "stems")
             if r is not True:
-                sys.exit("STOP: stems install failed - power-cycle the deck.")
+                sys.exit("STOP: stems install failed - switch the deck off and on, then install again (once).")
     if a.no_themes:
         print("5e  theme switching skipped (not selected)")
     else:
         print("5e  theme switching (MY SETTINGS [THEME])")
         r = until_pass(["tools/theme_switch_apply.py", "--precheck"], "themes")
         if r is not True:
-            sys.exit("STOP: theme install failed - power-cycle the deck.")
+            sys.exit("STOP: theme install failed - switch the deck off and on, then install again (once).")
     if a.no_flac:
         print("5h  FLAC skipped (not selected)")
     else:
         print("5h  FLAC playback (keep the USB stick OUT until the end)")
         r = until_pass(["tools/flac_apply.py"], "flac")
         if r is not True:
-            sys.exit("STOP: FLAC install failed - power-cycle the deck.")
+            sys.exit("STOP: FLAC install failed - switch the deck off and on, then install again (once).")
     if not a.brake or a.brake == 1:
         print("5v  vinyl brake length skipped (opt-in: --brake X)")
     else:
@@ -288,7 +297,7 @@ def main():
         else:
             r = until_pass(["tools/phasemeter_apply.py"], "phasemeter")
             if r is not True:
-                sys.exit("STOP: phase meter install failed - power-cycle the deck.")
+                sys.exit("STOP: phase meter install failed - switch the deck off and on, then install again (once).")
     if not a.keyshift:
         print("5k  real-time key shift skipped (opt-in: --keyshift)")
     else:

@@ -152,6 +152,8 @@ for ONE tester only. Do not publish, re-upload, or share.
 EOF
 cp tools/Studio-Info.plist "$APPDIR/Contents/Info.plist"
 if [ -f emu/icon.icns ]; then cp emu/icon.icns "$APPDIR/Contents/Resources/AppIcon.icns"; fi
+# pip install records hold the build Mac's folder path: not needed at runtime
+find "$APPDIR" -name direct_url.json -path "*dist-info*" -delete 2>/dev/null || true
 codesign --force --deep -s - "$APPDIR"
 FINAL="dist/XDJ Mod Studio.app"
 [ "$PUBLIC" = 1 ] && { mkdir -p dist/public; FINAL="dist/public/XDJ Mod Studio.app"; }
