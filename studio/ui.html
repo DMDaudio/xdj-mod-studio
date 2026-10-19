@@ -182,6 +182,8 @@ kbd { font: 11px var(--mono); background: var(--raise2); border: 1px solid var(-
 .cable .cstate { display: flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 600; white-space: nowrap; }
 .cable.on { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
 .cable.on svg { color: var(--green); }
+.cable .ctips { grid-column: 1 / -1; margin: 4px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.6; color: var(--text); }
+.cable.on .ctips { display: none; }
 @media (max-width: 640px) { .cable { grid-template-columns: 1fr; } }
 .panel .cable { grid-template-columns: 40px 1fr; gap: 12px; padding: 14px 16px; }
 .panel .cable svg { width: 38px; height: 38px; }
@@ -266,6 +268,13 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div><div class="cbig">Connect the deck with a USB cable</div>
       <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
       <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+      <ol class="ctips">
+        <li>Use the square <b>USB-B port on the back</b> of the XDJ-700, not the stick slot on the front.</li>
+        <li>Use a <b>data</b> cable (some only charge), plugged straight into the computer: no hub or dock.</li>
+        <li>Switch the deck on and wait for its home screen.</li>
+        <li>Quit rekordbox, Serato and any other DJ or MIDI app: they can grab the deck first.</li>
+        <li>Still nothing? Unplug, wait 10 seconds, plug back in.</li>
+      </ol>
     </div>
     <div class="panel checks" id="modlist"></div>
     <div class="panel checks" id="checks"></div>
@@ -280,6 +289,13 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div><div class="cbig">Connect the deck with a USB cable</div>
       <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
       <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+      <ol class="ctips">
+        <li>Use the square <b>USB-B port on the back</b> of the XDJ-700, not the stick slot on the front.</li>
+        <li>Use a <b>data</b> cable (some only charge), plugged straight into the computer: no hub or dock.</li>
+        <li>Switch the deck on and wait for its home screen.</li>
+        <li>Quit rekordbox, Serato and any other DJ or MIDI app: they can grab the deck first.</li>
+        <li>Still nothing? Unplug, wait 10 seconds, plug back in.</li>
+      </ol>
     </div>
       <h2>Pick your mods</h2>
       <div class="pick" id="pk-theme">
