@@ -1,8 +1,8 @@
 # XDJ-700 Mods
 
 Open-source mods for the **XDJ-700** (firmware 1.15): RGB and 3-band
-waveforms, new PERFORM-screen pads (beat jump, key shift,
-stems, 8 hot cues), live colour themes and more. There's also a Mac app,
+waveforms, live key shift, stems, beat jump pads, live colour themes and
+more. Fully open source (MIT). There's also a Mac app,
 **Mod Studio**, which prepares your tracks, designs themes, runs your deck's
 firmware in a built-in emulator and installs the mods.
 
@@ -17,24 +17,28 @@ on and it is completely stock again.
 
 ## What works
 
-| Mod | Status |
-| --- | --- |
-| RGB overview waveform | hardware proven |
-| RGB centre waveform | hardware proven |
-| 3-band overview waveform | hardware proven |
-| 3-band centre waveform | hardware proven |
-| MY SETTINGS rows (waveform, mods on/off, theme) | hardware proven |
-| PERFORM pads: BEAT JUMP, KEY SHIFT, STEMS tabs | hardware proven |
-| 8 hot cues (HOT CUE pages A–C / D–F / G–H) | emulator-proven |
-| Key & stem versions (switch mid-track) | hardware proven |
-| Live stem mutes (PERFORM STEMS pads, Demucs stems file) | hardware proven, ~30 s delay; faster mute = beta (emulator only so far) |
-| Live themes (switch on the deck, exact return to stock) | hardware proven |
-| Type 1 phase meter | emulator-proven |
-| FLAC and Ogg Opus playback | emulator-proven |
-| Real-time key shift, emulator audio | research |
+**Tested on a real deck**
 
-"Emulator-proven" means it passes against the real firmware in the
-emulator and is waiting for a hardware session.
+| Mod | Notes |
+| --- | --- |
+| RGB and 3-band waveforms | overview strip and centre display |
+| Live key shift | PERFORM › KEY SHIFT, MASTER TEMPO on, tempo stays put |
+| Live themes | from MY SETTINGS; OFF restores the stock colours exactly |
+| Live stems | PERFORM › STEMS mutes vocals / drums / bass / other, heard after ~30 s |
+| Beat jump pads | PERFORM › BEAT JUMP, tap and swipe (1–64 beats) |
+| MY SETTINGS rows | waveform style, mods on/off, theme |
+
+**Working in the emulator, not yet tested on a deck.** These run against the
+deck's real firmware in the emulator, so they should work on a real deck,
+but nobody has tried them on one yet:
+
+| Mod | Notes |
+| --- | --- |
+| Faster stem mute (beta) | rewrites the audio the deck already buffered; < 1 s in the emulator |
+| Phase meter | this deck's beats; the master row needs link data |
+| Vinyl brake length | MY SETTINGS › [VINYL BRAKE], 0.5×–15× |
+| 8 hot cues | pages A–C / D–F / G–H |
+| FLAC and Ogg Opus playback | own decoders on the deck |
 
 ## For DJs: Mod Studio
 

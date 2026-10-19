@@ -270,7 +270,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       </div>
       <div class="pick" id="pk-liveks">
         <input type="checkbox" id="pk-liveks-on">
-        <div class="body"><b>Live Key Shift <span class="faint">(beta)</span></b><div class="d">PERFORM › KEY SHIFT shifts any track −6…+6 semitones while it plays, tempo unchanged (MASTER TEMPO on). Installed live into the deck's audio chip (no restart, the sound never stops), with the stick out. Tested on a real deck: the key moves, the tempo stays.</div></div>
+        <div class="body"><b>Live Key Shift</b><div class="d">PERFORM › KEY SHIFT shifts any track −6…+6 semitones while it plays, tempo unchanged (MASTER TEMPO on). Installed live into the deck's audio chip (no restart, the sound never stops), with the stick out. Tested on a real deck: the key moves, the tempo stays.</div></div>
       </div>
       <div class="pick" id="pk-phase">
         <input type="checkbox" id="pk-phase-on">
@@ -469,7 +469,6 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div><h2>2. What to bake in</h2><div class="small dim">These stay on the deck after power-off. Everything else (coloured centre waveform, hot cue pages, themes, live stems, FLAC, live key shift) is still installed over USB from the Mods tab.</div></div>
       <div class="row"><span class="dim" style="width:150px">Overview waveform</span><div class="seg" id="updwave"><button data-v="blue">Blue</button><button data-v="rgb" aria-pressed="true">RGB</button><button data-v="3band">3-Band</button></div></div>
       <label class="row"><input type="checkbox" id="updpads" checked> PERFORM pads (BEAT JUMP / KEY SHIFT / STEMS tabs)</label>
-      <label class="row"><input type="checkbox" id="updvers" checked> Key &amp; stem version switching</label>
       <div class="small faint">MY SETTINGS rows are always included. The deck will show firmware version <b>1.16</b> in UTILITY so you can tell it apart.</div>
     </div>
     <div class="panel stack" style="gap:8px">
@@ -592,11 +591,11 @@ const TICK = '<span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="cu
 const HOME_MODS = () => [
   {n: 'Themes', ok: ST.themes_ok, d: ST.themes_ok ? `${Object.keys(ST.themes || {}).length} presets — make your own in Theme Builder` : 'theme engine missing', go: 'builder'},
   {n: 'Waveforms', ok: true, d: 'RGB, 3-band or your own colour', go: 'mods'},
-  {n: 'Key Shift', ok: true, d: 'keep tempo, shift key — hear it in Track Builder', go: 'tracks'},
-  {n: 'Stems', ok: ST.demucs, d: ST.demucs ? 'instrumental + acapella files, Demucs ready' : 'needs Demucs — see Settings', go: ST.demucs ? 'tracks' : 'settings'},
-  {n: 'PERFORM Pads', ok: true, d: 'BEAT JUMP pads + KEY control on the deck', go: 'mods'},
+  {n: 'Live Key Shift', ok: true, d: 'shift key while it plays, tempo stays put', go: 'mods'},
+  {n: 'Stems', ok: ST.demucs, d: ST.demucs ? 'vocals / drums / bass / other, muted live on the deck' : 'needs Demucs — see Settings', go: ST.demucs ? 'tracks' : 'settings'},
+  {n: 'PERFORM Pads', ok: true, d: 'BEAT JUMP, KEY SHIFT and STEMS tabs on the deck', go: 'mods'},
   {n: 'Extra Hot Cues', ok: true, d: '8 hot cues on the deck now (pages A–C / D–F / G–H); more pages may come', go: 'mods'},
-  {n: 'Adjustable Vinyl Break', ok: false, soon: true, d: 'in research', go: null},
+  {n: 'Vinyl Brake Length', ok: true, d: 'MY SETTINGS › [VINYL BRAKE] on the deck (emulator-tested)', go: 'mods'},
 ];
 $('#dimples').innerHTML = Array.from({length: 36}, (_, k) => { const a = k / 36 * Math.PI * 2; return `<circle cx="${75 + 46 * Math.cos(a)}" cy="${75 + 46 * Math.sin(a)}" r="1.8"/>`; }).join('');
 $('#hgo').onclick = () => showTab('mods'); $('#hemu').onclick = () => showTab('emu');
@@ -652,7 +651,7 @@ $('#updbtn').onclick = async () => {
   if (!ok) return;
   const ack = {}; $$('.updack').forEach(c => ack[c.dataset.k] = c.checked);
   const r = await api('/api/upd/build', {path: $('#updpath').value.trim(), mode: UPD.wave,
-    pads: $('#updpads').checked, versions: $('#updvers').checked, ack});
+    pads: $('#updpads').checked, versions: false, ack});
   if (r) { toast('Building + boot-testing — about 5 minutes.'); watch(); }
 };
 
@@ -965,7 +964,7 @@ function pick(d) {
     .filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('');
   ['rgb', '3band', 'blue'].forEach(s => $('#w-' + s).src = `/api/wave?dir=${encodeURIComponent(d)}&style=${s}&tint=stock`);
   $('#w-custom').src = `/api/wave?dir=${encodeURIComponent(d)}&style=custom&custom=${encodeURIComponent(MOD.custom || '#6ba3f0')}`;
-  const showx7s = !!(t.has_sidecar && !t.has_stems);
+  const showx7s = false;   // sidecar -> key/stem VERSION file retired 2026-10-19 (stems = STEMS-4 only)
   $('#x7srow').hidden = !showx7s;
   $('#x7krow').hidden = !(t.exists && t.duration);
   $('#x7klive').value = 0; $('#x7klivev').textContent = '+0';
@@ -1015,7 +1014,7 @@ async function kdlg(dirs) {
       const mins2 = mins; const t = 0.8 + mins2 * 0.45;   // demucs + build + encode
       return `≈ <b>${(mins2 * rate).toFixed(1)} MB</b> stems file for ${mins2.toFixed(1)} min of audio · takes about <b>${t < 1 ? '1 min' : Math.round(t) + ' min'}</b>${dirs.length > 1 ? ` (${dirs.length} tracks: scales up)` : ''}`; };
   const okp = ask('Stems · ' + `${dirs.length} track${dirs.length > 1 ? 's' : ''}`,
-    'Instrumental and acapella versions in one file. Key shift on the deck is real time now — no key files needed.', 'Build', extra);
+    'Vocals, drums, bass and other in one file. Mute them live from PERFORM › STEMS on the deck.', 'Build', extra);
   const upd = () => { const el = document.querySelector('#dxest'); if (el) el.innerHTML = est(); };
   upd();
   const ok = await okp;
@@ -1028,7 +1027,7 @@ $('#bstems').onclick = () => kdlg(chosen()); $('#istems').onclick = () => kdlg(C
 $('#ix7s').onclick = async () => {
   const t = track(CUR); if (!t) return toast('Pick a track first.');
   if (!t.has_sidecar || t.has_stems) return;
-  const ok = await ask('Deck stems file', 'Decode the small opus sidecar into the deck-playable stems file (instrumental + acapella, sample-aligned to the mix). A couple of minutes.', 'Build');
+  const ok = await ask('Deck stems file', 'Decode the small opus sidecar into the deck-playable stems file (vocals, drums, bass and other, sample-aligned to the mix). A couple of minutes.', 'Build');
   if (!ok) return;
   api('/api/x7s', {audio: t.audio}).then(r => r && watch());
 };

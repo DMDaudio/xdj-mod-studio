@@ -100,7 +100,7 @@ def tick():
     fb_png(m, f"{OUT}/{i:05d}.png")
     frames.append(i)
     state.append({"t": REC0 + t_deck, "blk": d.bus.read(0x11837CCC, 4),
-                  "key": int(np.int8(mem.r8(PP.PST + 60))), "mask": mem.r8(PP.PMASK) & 15,
+                  "key": ((mem.r8(PP.PST + 60) + 128) & 255) - 128, "mask": mem.r8(PP.PMASK) & 15,
                   "dsp": d.bus.read(0x11837BF8, 4)})
 
 
@@ -167,20 +167,25 @@ tap(pad(4))                              # << 16 (fires on release)
 until(BJ + 2 * D[4] / 3 - 0.15)
 tap(pad(5))                              # >> 16
 until(KS - 0.15)
-tap(TAB(2))                              # KEY SHIFT
-tap((551, 264))
-tap((551, 264))                          # +2
-until(KS + D[5] / 2 - 0.3)
-for _ in range(4):
-    tap((181, 264))                      # down to -2
+tap(TAB(2))                              # KEY SHIFT (at 0)
+step = D[5] / 6
+# 0 -> +1 -> +2 -> RESET 0 -> -1 -> -2, one step every D/6 s
+for i, xy in enumerate([(551, 264), (551, 264), (365, 264), (181, 264), (181, 264)]):
+    until(KS + (i + 1) * step - 0.1)
+    tap(xy)
 until(ST - 0.15)
 tap((365, 264))                          # RESET
 tap(TAB(3))                              # STEMS
 until(ST + D[6] / 2 - 0.15)
 x, w = PP.STEMS5[0]
 tap((x + 50, PP.HC_Y + PP.HC_H // 2))    # VOCALS off
-until(MORE - 0.15)
-tap(TAB(0))                              # HOT CUE
+until(MORE - 0.4)
+tap((x + 50, PP.HC_Y + PP.HC_H // 2))    # VOCALS back on
+tap((718, 38))                           # PERFORM off
+for k in ("Browse", "Back", "Back"):     # browse top level (MY SETTINGS lives there)
+    cur_frame = panl.build_frame(keys=[k]); tick(); cur_frame = panl.build_frame(); tick(); tick()
+until(MORE + 0.8)
+cur_frame = panl.build_frame(keys=["MenuUtility"]); tick(); cur_frame = panl.build_frame(); tick()
 until(REC1)
 a = np.array(dac, dtype=np.uint32).view(np.int32)
 a = (a[: len(a) // 2 * 2].reshape(-1, 2) >> 16).astype(np.int16)
