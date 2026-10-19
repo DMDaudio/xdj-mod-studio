@@ -33,9 +33,10 @@ VERSION = os.environ.get("XDJ_VERSION", "dev")
 README = """XDJ Mod Studio for Windows ({ver})
 =================================
 
-Start: double-click "XDJ Mod Studio.exe". A black window opens (that is
-the app's engine - leave it open; closing it quits the app) and the app
-itself opens in Microsoft Edge or Chrome as its own window. If Windows
+Start: double-click "XDJ Mod Studio.exe". The app opens in Microsoft Edge
+or Chrome as its own window. Closing that window is all you need to do:
+the app finishes any running job and then quits by itself about 10
+minutes later. Double-click the exe again any time to reopen it. If Windows
 SmartScreen warns about an unknown publisher: More info -> Run anyway
 (the app is not code-signed).
 
@@ -52,7 +53,8 @@ Not on Windows yet: emulator sound (the emulator runs silent).
 Track Builder needs ffmpeg (and rubberband for key versions) on PATH.
 
 Your settings and firmware files live in
-%LOCALAPPDATA%\\XDJ Mod Studio. Deleting that folder resets the app.
+%LOCALAPPDATA%\\XDJ Mod Studio (logs in its "logs" folder). Deleting
+that folder resets the app.
 
 Everything here goes in the deck's memory: switch the deck off and on and
 it is stock again. Not affiliated with Pioneer DJ / AlphaTheta.

@@ -38,6 +38,32 @@ WINDOWS = sys.platform == "win32"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from emu.paths import app_support_dir  # noqa: E402  (stdlib-only module)
 if WINDOWS:
+    # The Windows app is built windowed (no black console window): its
+    # stdout/stderr are None unless a caller (CI, a parent tool) piped them.
+    # Then everything goes to a log file in the app's own folder.
+    if sys.stdout is None or sys.stderr is None:
+        try:
+            _logd = os.path.join(app_support_dir(), "logs")
+            os.makedirs(_logd, exist_ok=True)
+            _log = open(os.path.join(_logd, "tool.log" if "--run-tool" in sys.argv
+                                     else "studio.log"), "a", encoding="utf-8",
+                        errors="replace", buffering=1)
+        except Exception:
+            _log = open(os.devnull, "w")
+        if sys.stdout is None:
+            sys.stdout = _log
+        if sys.stderr is None:
+            sys.stderr = _log
+    # child processes (tools, objdump, ffmpeg...) must not pop up console
+    # windows either: default every Popen to CREATE_NO_WINDOW
+    import subprocess as _sp
+    _popen_init = _sp.Popen.__init__
+
+    def _quiet_init(self, *a, **kw):
+        if not kw.get("creationflags"):
+            kw["creationflags"] = 0x08000000          # CREATE_NO_WINDOW
+        _popen_init(self, *a, **kw)
+    _sp.Popen.__init__ = _quiet_init
     # tools print non-ASCII (arrows, +-); the Windows console codepage can't
     # encode them -> UnicodeEncodeError. UTF-8 everywhere, never crash.
     for _s in (sys.stdout, sys.stderr):
@@ -1701,9 +1727,16 @@ class H(BaseHTTPRequestHandler):
         self.send({"error": "not found"}, code=404)
 
 
+_LAST_REQ = [time.time()]
+
+
 class Server(ThreadingHTTPServer):
     daemon_threads = True
     request_queue_size = 64
+
+    def process_request(self, request, client_address):
+        _LAST_REQ[0] = time.time()
+        super().process_request(request, client_address)
 
     def handle_error(self, request, client_address):
         # the browser cancelling an image/stream request is normal: stay quiet
@@ -1718,6 +1751,26 @@ def _arg(name, default=None):
         if i + 1 < len(sys.argv):
             return sys.argv[i + 1]
     return default
+
+
+def _quit_when_unused(idle_s=600):
+    """Windows app: there is no window of its own to close (the UI is an
+    Edge/Chrome app window that polls /api/state every few seconds). Once
+    nothing has asked for anything for idle_s and no job is running, quit
+    instead of lingering in the background."""
+    def run():
+        while True:
+            time.sleep(30)
+            with LOCK:
+                busy = any(j.get("state") == "running" for j in JOBS.values())
+            if not busy and time.time() - _LAST_REQ[0] > idle_s:
+                if _EMU[0] is not None:
+                    try:
+                        _EMU[0].shutdown()
+                    except Exception:
+                        pass
+                os._exit(0)
+    threading.Thread(target=run, daemon=True).start()
 
 
 def _watch_parent(pid):
@@ -1758,6 +1811,8 @@ def main():
     # the Mac app reads this line to learn where to point its window
     print(f"READY {port}", flush=True)
     threading.Thread(target=_deck_watch, daemon=True).start()
+    if WINDOWS and FROZEN and "--no-browser" not in sys.argv:
+        _quit_when_unused()
     if "--no-browser" not in sys.argv:
         open_window(url)
     try:

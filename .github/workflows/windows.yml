@@ -96,10 +96,20 @@ jobs:
           $exe = Join-Path $app "XDJ Mod Studio.exe"
           $env:LOCALAPPDATA = Join-Path $t "appdata"      # empty user profile
           New-Item -ItemType Directory $env:LOCALAPPDATA | Out-Null
-          Push-Location $app
-          & $exe --run-tool tools/win_selftest.py
-          if ($LASTEXITCODE -ne 0) { throw "built-in checks failed" }
-          Pop-Location
+          # must be a windowed (GUI-subsystem) exe: no black console window
+          $b = [IO.File]::ReadAllBytes($exe); $pe = [BitConverter]::ToInt32($b, 0x3C)
+          $sub = [BitConverter]::ToUInt16($b, $pe + 0x5C)
+          if ($sub -ne 2) { throw "exe subsystem is $sub, expected 2 (windowed)" }
+          Write-Host "exe is windowed (subsystem 2)"
+          # windowed exe: PowerShell won't wait for it or show its output on
+          # its own, so wait explicitly and print the redirected output
+          $st = Join-Path $t "selftest.log"
+          $q = Start-Process -FilePath $exe -ArgumentList "--run-tool","tools/win_selftest.py" `
+                 -WorkingDirectory $app -RedirectStandardOutput $st `
+                 -RedirectStandardError "$st.err" -Wait -PassThru
+          Get-Content $st, "$st.err" -ErrorAction SilentlyContinue
+          if ($q.ExitCode -ne 0) { throw "built-in checks failed" }
+          if (-not (Select-String -Path $st -Pattern "RESULT: PASS" -Quiet)) { throw "no PASS line" }
           $log = Join-Path $t "server.log"
           $p = Start-Process -FilePath $exe -ArgumentList "--no-browser","--port","8799" `
                  -RedirectStandardOutput $log -RedirectStandardError "$log.err" -PassThru

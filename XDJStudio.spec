@@ -79,7 +79,8 @@ a = Analysis(["studio/app.py"], pathex=["vendor", "."], binaries=binaries,
              cipher=block_cipher, noarchive=False)
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="XDJ Mod Studio",
-          debug=False, strip=False, upx=False, console=True,
+          debug=False, strip=False, upx=False,
+          console=not WIN,          # Windows: no black console window
           icon=(os.path.join(NATIVES, "icon.ico") if WIN and
                 os.path.exists(os.path.join(NATIVES, "icon.ico")) else None))
 coll = COLLECT(exe, a.binaries, a.zipfiles, a.datas, strip=False, upx=False,
