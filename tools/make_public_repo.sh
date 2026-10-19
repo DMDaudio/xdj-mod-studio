@@ -59,8 +59,9 @@ EOT
 # the private .gitignore names private notes and firmware files: the public
 # repo gets its own short, generic one instead
 cat > "$DEST/.gitignore" <<'EOT'
-# Python / OS
+# Python / OS / other tools
 .venv/
+.freebuff/
 __pycache__/
 *.pyc
 .DS_Store

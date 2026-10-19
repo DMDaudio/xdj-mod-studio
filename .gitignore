@@ -1,5 +1,6 @@
-# Python / OS
+# Python / OS / other tools
 .venv/
+.freebuff/
 __pycache__/
 *.pyc
 .DS_Store
