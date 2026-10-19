@@ -2,7 +2,7 @@
 
 Open-source mods for the **XDJ-700** (firmware 1.15): RGB and 3-band
 waveforms, live key shift, stems, beat jump pads, live colour themes and
-more. Fully open source (MIT). There's also a Mac app,
+more. Fully open source (MIT). There's also a Mac and Windows app,
 **Mod Studio**, which prepares your tracks, designs themes, runs your deck's
 firmware in a built-in emulator and installs the mods.
 
@@ -42,8 +42,16 @@ but nobody has tried them on one yet:
 
 ## For DJs: Mod Studio
 
-1. Download Mod Studio from Releases (Apple Silicon Mac, macOS 14+).
-   The first time, right-click the app and choose Open.
+1. Download Mod Studio from Releases.
+   - **Mac** (Apple Silicon, macOS 14+): `XDJ-Mod-Studio.zip`. The first
+     time, right-click the app and choose Open.
+   - **Windows** (64-bit Windows 10/11, beta): `XDJ-Mod-Studio-Windows.zip`.
+     Unzip it and run `XDJ Mod Studio.exe` (SmartScreen: More info → Run
+     anyway). Every build is checked by CI on a clean Windows
+     machine (the app starts, its pages load, the emulator engine loads).
+     Running your firmware in the emulator and installing to a real deck
+     from Windows have **not been tried by a person yet** (both are proven
+     on a Mac), and the emulator is silent on Windows for now. Please report how it goes.
 2. **Add your firmware.** Get the official XDJ-700 firmware 1.15 update file
    from Pioneer DJ's support site and give it to Mod Studio when it asks.
    It checks the exact file, then builds everything it needs in about
