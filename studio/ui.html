@@ -1,0 +1,1148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>XDJ Mod Studio</title>
+<style>
+:root {
+  --bg: #0e0f12; --panel: #16181c; --raise: #1d1f25; --raise2: #262932; --line: #2a2d35; --line2: #383c47;
+  --text: #eceef2; --dim: #a0a4af; --faint: #6b6f7b;
+  --blue: #3d8bff; --blue-d: #2c6fd6; --amber: #ffb020; --green: #3ecf8e; --red: #ff5d5d;
+  --r: 10px;
+  --sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; overflow: hidden; }
+body { background: radial-gradient(900px 420px at 80% -8%, #15233d 0%, transparent 70%), var(--bg); color: var(--text); font: 13px/1.45 var(--sans); -webkit-font-smoothing: antialiased;
+  display: flex; flex-direction: column; user-select: none; -webkit-user-select: none; }
+input, select, button, textarea { font: inherit; color: inherit; }
+input[type=text], .field { user-select: text; -webkit-user-select: text; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+h1 { font-size: 20px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
+h2 { font-size: 13px; font-weight: 650; margin: 0 0 10px; }
+.dim { color: var(--dim); } .faint { color: var(--faint); } .small { font-size: 12px; }
+.grow { flex: 1; min-width: 0; }
+
+.bar { background-image: linear-gradient(180deg, #1c1e24, #14161a) !important; box-shadow: inset 0 -1px 0 #000, 0 1px 0 #ffffff08; display: flex; align-items: center; height: 52px; padding: 0 16px; flex: none; border-bottom: 1px solid var(--line); background: var(--panel); gap: 16px; }
+.brand { display: flex; align-items: center; gap: 9px; font-weight: 650; letter-spacing: -.01em; width: 190px; }
+.tabs { display: flex; gap: 2px; align-self: stretch; }
+.tabs button { border: 0; background: none; padding: 0 14px; cursor: pointer; color: var(--dim); font-weight: 560; position: relative; }
+.tabs button:hover { color: var(--text); }
+.tabs button[aria-selected=true] { color: var(--text); }
+.tabs button[aria-selected=true]::after { content: ""; position: absolute; left: 12px; right: 12px; bottom: -1px; height: 2px; background: var(--blue); border-radius: 2px 2px 0 0; box-shadow: 0 0 12px 1px #3d8bffaa; }
+.right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.status { display: flex; align-items: center; gap: 7px; color: var(--dim); font-size: 12px; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; display: inline-block; }
+.dot.ok { background: var(--green); box-shadow: 0 0 8px #3ecf8e88; } .dot.warn { background: var(--amber); } .dot.bad { background: var(--red); }
+.dot.run { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .dot.run { animation: none; } }
+
+.btn { border: 1px solid var(--line2); background: var(--raise); padding: 6px 13px; border-radius: 7px; cursor: pointer; font-weight: 560; white-space: nowrap; }
+.btn:hover:not(:disabled) { background: var(--raise2); }
+.btn.primary { background: linear-gradient(180deg, #5299ff, #3279ee); box-shadow: 0 0 0 1px #00000040, 0 4px 14px #3d8bff44, inset 0 1px 0 #ffffff40; border-color: var(--blue); color: #fff; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+.btn.quiet { background: none; border-color: transparent; color: var(--dim); }
+.btn.quiet:hover:not(:disabled) { background: var(--raise); color: var(--text); }
+.btn:disabled { opacity: .4; cursor: default; }
+.btn.sm { padding: 3px 9px; font-size: 12px; }
+select, .field { background: var(--raise); border: 1px solid var(--line2); border-radius: 7px; padding: 6px 9px; color: var(--text); max-width: 100%; }
+.field { width: 100%; }
+.seg { display: inline-flex; background: var(--raise); border: 1px solid var(--line); border-radius: 8px; padding: 2px; gap: 2px; }
+.seg button { border: 0; background: none; padding: 4px 12px; border-radius: 6px; cursor: pointer; color: var(--dim); font-weight: 560; }
+.seg button[aria-pressed=true] { background: var(--raise2); color: var(--text); box-shadow: 0 0 0 1px var(--line2); }
+input[type=checkbox] { accent-color: var(--blue); width: 15px; height: 15px; margin: 0; }
+input[type=range] { width: 100%; accent-color: var(--blue); }
+.hue { -webkit-appearance: none; height: 6px; border-radius: 99px; background: linear-gradient(90deg, red, #ff0, lime, cyan, blue, #f0f, red); }
+.hue::-webkit-slider-thumb { -webkit-appearance: none; width: 14px; height: 14px; border-radius: 50%; background: #fff; border: 2px solid #0007; }
+
+main { flex: 1; min-height: 0; position: relative; }
+.page { position: absolute; inset: 0; display: none; }
+.page.on { display: flex; }
+.panel { background: linear-gradient(180deg, #1a1c21, #15171b); border: 1px solid var(--line); border-radius: var(--r); box-shadow: inset 0 1px 0 #ffffff0f, 0 8px 24px #0006; }
+.scroll { overflow: auto; }
+.pad { padding: 16px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.notice { gap: 10px; align-items: flex-start; padding: 10px 12px; border-radius: 8px; background: #2a2210; border: 1px solid #5a4514; color: #ffd98a; }
+.notice:not([hidden]) { display: flex; }
+.notice.bad { background: #2b1416; border-color: #6a2a2e; color: #ffb3b3; }
+.notice .btn { margin-left: auto; }
+.empty { color: var(--faint); text-align: center; padding: 36px 12px; }
+
+/* ticks (mods checklist) */
+.tick { width: 20px; height: 20px; flex: none; border-radius: 50%; display: grid; place-items: center;
+  background: var(--green); color: #08130d; }
+.tick svg { width: 12px; height: 12px; }
+.tick.off { background: none; border: 1.5px dashed var(--line2); }
+.tick.soon { background: none; border: 1.5px solid var(--line2); color: var(--faint); font-size: 10px; font-weight: 700; }
+.modrow { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+.modrow:first-child { border-top: 0; }
+.modrow b { font-weight: 600; width: 128px; flex: none; }
+.modrow .d { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.modrow .d.warn { color: var(--amber); }
+.modrow.click { cursor: pointer; border-radius: 8px; }
+.modrow.click:hover { background: #ffffff06; }
+
+#p-home { padding: 24px; justify-content: center; overflow: auto; }
+.home { width: min(920px, 100%); display: flex; flex-direction: column; gap: 16px; margin: auto 0; }
+.hero { display: flex; align-items: center; gap: 28px; padding: 26px 30px; background: radial-gradient(500px 220px at 12% 50%, #17294a 0%, transparent 70%), linear-gradient(180deg, #1a1c21, #15171b); }
+.hero h1 { font-size: 28px; letter-spacing: -.02em; }
+.hero p { margin: 6px 0 16px; color: var(--dim); max-width: 48ch; font-size: 14px; }
+.jog { width: 140px; height: 140px; flex: none; }
+.jog .ring { stroke: var(--amber); filter: drop-shadow(0 0 7px #ffb02099); transition: stroke .3s; }
+.hero.ready .jog .ring { stroke: var(--blue); filter: drop-shadow(0 0 9px #3d8bffcc); }
+.jog .plat { animation: spin 14s linear infinite; transform-origin: 75px 75px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .jog .plat { animation: none; } }
+.checks { padding: 6px 18px; }
+.chk { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+.chk:first-child { border-top: 0; }
+.chk b { width: 130px; font-weight: 600; flex: none; }
+.chk span.d { color: var(--dim); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Mods (the mod builder) */
+#p-mods { flex-direction: column; }
+.mods-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(360px, 460px) minmax(0, 1fr); gap: 16px; padding: 16px; }
+.pick { display: flex; align-items: flex-start; gap: 12px; padding: 13px 0; border-top: 1px solid var(--line); }
+.pick:first-of-type { border-top: 0; padding-top: 2px; }
+.pick input[type=checkbox] { margin-top: 2px; }
+.pick .body { flex: 1; min-width: 0; }
+.pick b { font-weight: 600; display: block; }
+.pick .d { color: var(--dim); font-size: 12px; margin-top: 2px; }
+.pick .cfg { margin-top: 7px; }
+.pick.off .body { opacity: .45; }
+.modsum { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; }
+.modsum span { background: var(--raise); border: 1px solid var(--line); padding: 2px 9px; border-radius: 99px; font-size: 12px; color: var(--dim); }
+
+/* Theme builder */
+#p-builder { flex-direction: column; }
+.builder-body { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(340px, 410px) minmax(0, 1fr); gap: 16px; padding: 16px; }
+.sec { padding: 14px 0; border-top: 1px solid var(--line); }
+.sec.first { border-top: 0; padding-top: 0; }
+.sws { display: grid; grid-template-columns: repeat(auto-fill, minmax(62px, 1fr)); gap: 8px; }
+.sw { border: 0; background: none; padding: 0; cursor: pointer; text-align: center; font-size: 11px; color: var(--dim); min-width: 0; }
+.sw i { display: block; height: 30px; border-radius: 7px; margin-bottom: 4px; border: 2px solid transparent; }
+.sw span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sw[aria-pressed=true] i { border-color: var(--text); } .sw[aria-pressed=true] { color: var(--text); }
+.ctl { display: grid; grid-template-columns: 84px 1fr 38px; align-items: center; gap: 10px; margin-top: 9px; color: var(--dim); }
+.ctl output { text-align: right; font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px; }
+.screen { border-radius: 8px; overflow: hidden; background: #000; aspect-ratio: 5 / 3; border: 1px solid var(--line); }
+.screen img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.actionbar { flex: none; display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; }
+.kv dt { color: var(--dim); } .kv dd { margin: 0; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+#p-emu { padding: 16px; gap: 16px; }
+.stage { flex: 1; min-width: 0; position: relative; display: flex; align-items: center; justify-content: center; background: #0a0b0d; border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+#deckbox { position: relative; touch-action: none; cursor: default; }
+#deckimg { display: block; width: 100%; height: 100%; -webkit-user-drag: none; pointer-events: none; }
+.side { width: 290px; flex: none; display: flex; flex-direction: column; gap: 14px; }
+.side .panel { padding: 14px; }
+.keys { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 5px 10px; align-items: center; }
+kbd { font: 11px var(--mono); background: var(--raise2); border: 1px solid var(--line2); border-bottom-width: 2px; border-radius: 4px; padding: 0 5px; min-width: 20px; text-align: center; display: inline-block; }
+
+/* Track builder */
+#p-tracks { padding: 16px; gap: 16px; }
+.lib { flex: 1; min-width: 0; display: flex; flex-direction: column; padding: 14px 14px 10px; }
+.libhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 10px; }
+.chips { display: flex; gap: 6px; align-items: center; margin-bottom: 8px; }
+.list { flex: 1; overflow: auto; border-top: 1px solid var(--line); }
+.tr { display: grid; grid-template-columns: 24px minmax(0, 2.2fr) minmax(0, 1.4fr) 62px 52px 104px 84px; gap: 10px; align-items: center; padding: 6px 8px; border-radius: 6px; }
+.tr.h { color: var(--faint); font-size: 11.5px; position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.tr:not(.h):hover { background: var(--raise); }
+.tr.sel { background: var(--raise2); box-shadow: inset 2px 0 0 var(--blue); }
+.tr .t { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.num { font-variant-numeric: tabular-nums; color: var(--dim); }
+.tag { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.tag i { width: 7px; height: 7px; border-radius: 50%; background: var(--faint); }
+.tag.ok i { background: var(--green); } .tag.rb i { background: var(--blue); } .tag.no i { background: var(--amber); }
+.selbar { display: flex; align-items: center; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.insp { width: 340px; flex: none; padding: 16px; display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+.meta { display: flex; gap: 6px; flex-wrap: wrap; }
+.meta span { background: var(--raise); border-radius: 6px; padding: 2px 8px; font-size: 12px; color: var(--dim); }
+.pbtn { width: 34px; height: 34px; border-radius: 50%; border: 0; background: var(--text); color: var(--bg); display: grid; place-items: center; cursor: pointer; flex: none; }
+.pbtn:disabled { opacity: .3; cursor: default; }
+.wf { position: relative; }
+.wf .lbl { display: flex; justify-content: space-between; font-size: 12px; color: var(--dim); margin: 8px 0 3px; }
+.wf img { display: block; width: 100%; height: 48px; image-rendering: pixelated; background: #000; border-radius: 6px; cursor: pointer; }
+.ph { position: absolute; width: 2px; background: #fff; pointer-events: none; display: none; }
+.actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.actions .btn { width: 100%; }
+.est { margin-top: 10px; padding: 8px 10px; border-radius: 8px; background: var(--raise); color: var(--dim); font-size: 12px; }
+.est b { color: var(--text); font-weight: 600; }
+
+#p-settings { padding: 16px; justify-content: center; }
+.settings { width: min(680px, 100%); display: flex; flex-direction: column; gap: 14px; overflow: auto; margin: 0 auto; padding: 22px 16px 40px; box-sizing: border-box; max-height: 100%; }
+.bake { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.bake ul { margin: 6px 0 0 16px; padding: 0; line-height: 1.55; font-size: 13px; color: var(--dim); }
+.bakeh { font-weight: 600; font-size: 13px; color: var(--text); }
+.bakeh.ok { color: var(--teal, #19d3c5); }
+@media (max-width: 640px) { .bake { grid-template-columns: 1fr; } }
+.settings .panel { padding: 16px; }
+code { background: var(--raise); padding: 1px 6px; border-radius: 5px; font: 12px var(--mono); user-select: text; }
+
+/* Activity: build cards, not a terminal */
+#act { position: fixed; right: 16px; top: 60px; width: min(440px, calc(100vw - 32px)); max-height: calc(100vh - 80px); overflow: auto; z-index: 20; display: none;
+  background: var(--panel); border: 1px solid var(--line2); border-radius: var(--r); box-shadow: 0 18px 50px #000b; }
+#act.on { display: block; }
+.acth { display: flex; justify-content: space-between; align-items: center; padding: 10px 14px; border-bottom: 1px solid var(--line); font-weight: 650; position: sticky; top: 0; background: var(--panel); }
+.job { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+.job .t { display: flex; align-items: center; gap: 8px; }
+.job .t b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .s { font-size: 12px; font-weight: 600; flex: none; } .s.running { color: var(--blue); } .s.done { color: var(--green); } .s.failed { color: var(--red); }
+.job .note { color: var(--dim); margin-top: 5px; }
+.job .meta { margin-top: 6px; font-size: 12px; color: var(--faint); font-variant-numeric: tabular-nums; }
+.pb { height: 6px; border-radius: 99px; background: var(--raise2); overflow: hidden; margin-top: 8px; }
+.pb i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--blue-d), var(--blue)); transition: width .6s ease; border-radius: 99px; }
+.pb.ind i { width: 30%; background: var(--line2); animation: slide 1.2s ease-in-out infinite alternate; }
+@keyframes slide { to { transform: translateX(220%); } }
+@media (prefers-reduced-motion: reduce) { .pb.ind i { animation: none; } }
+.job details { margin-top: 8px; }
+.job summary { cursor: pointer; color: var(--faint); font-size: 12px; }
+.job pre { margin: 6px 0 0; font: 11px/1.45 var(--mono); color: var(--dim); white-space: pre-wrap; max-height: 140px; overflow: auto; user-select: text; }
+dialog { background: var(--panel); color: var(--text); border: 1px solid var(--line2); border-radius: 12px; padding: 20px; width: min(460px, calc(100vw - 32px)); }
+dialog::backdrop { background: #000a; }
+dialog h2 { font-size: 16px; margin-bottom: 6px; }
+.dlgfoot { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+.opts { display: flex; gap: 8px; flex-wrap: wrap; margin: 12px 0 0; }
+.opts label { background: var(--raise); border-radius: 7px; padding: 6px 11px; display: flex; gap: 6px; align-items: center; cursor: pointer; }
+#toast { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 40; display: flex; flex-direction: column; gap: 8px; align-items: center; pointer-events: none; }
+#toast div { background: var(--raise2); border: 1px solid var(--line2); border-radius: 8px; padding: 8px 14px; box-shadow: 0 8px 30px #000a; max-width: 80vw; }
+#toast div.bad { border-color: #7a3236; color: #ffb3b3; }
+</style>
+</head>
+<body>
+<header class="bar">
+  <div class="brand">
+    <svg width="26" height="26" viewBox="0 0 64 64" aria-hidden="true"><rect x="2" y="2" width="60" height="60" rx="15" fill="#0e0f12" stroke="#2a2d35"/><circle cx="32" cy="32" r="21" fill="none" stroke="#3d8bff" stroke-width="3.2"/><circle cx="32" cy="32" r="17" fill="#1e2026"/><circle cx="32" cy="32" r="6" fill="#eceef2"/><rect x="30.6" y="9" width="2.8" height="7" rx="1.4" fill="#eceef2"/></svg>
+    <span>XDJ Mod Studio</span>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-p="home" aria-selected="true">Home</button>
+    <button role="tab" data-p="mods" aria-selected="false">Mods</button>
+    <button role="tab" data-p="builder" aria-selected="false">Theme Builder</button>
+    <button role="tab" data-p="tracks" aria-selected="false">Track Builder</button>
+    <button role="tab" data-p="emu" aria-selected="false">Emulator <span class="faint">(beta)</span></button>
+    <button role="tab" data-p="upd" aria-selected="false">Permanent <span class="faint">(UPD)</span></button>
+    <button role="tab" data-p="settings" aria-selected="false">Settings</button>
+  </nav>
+  <div class="right">
+    <span class="status" title="XDJ-700 connected over USB"><span class="dot" id="deckdot"></span><span id="decktxt">No deck</span></span>
+    <button class="btn sm primary" id="updpill" hidden>Update available</button>
+    <button class="btn sm quiet" id="actbtn">Activity <span class="dot" id="actdot" hidden></span></button>
+  </div>
+</header>
+
+<main>
+<section class="page on" id="p-home" role="tabpanel">
+  <div class="home">
+    <div class="panel hero" id="hero">
+      <svg class="jog" viewBox="0 0 150 150" aria-hidden="true">
+        <circle class="ring" cx="75" cy="75" r="66" fill="none" stroke-width="6"/>
+        <g class="plat"><circle cx="75" cy="75" r="57" fill="#1e2026"/>
+          <g fill="#3a3d47" id="dimples"></g><rect x="72" y="22" width="6" height="14" rx="3" fill="#eceef2"/></g>
+        <circle cx="75" cy="75" r="19" fill="#eceef2"/>
+      </svg>
+      <div><h1 id="hhead">Checking your setup…</h1><p id="hsub"></p>
+        <div class="row"><button class="btn primary" id="hgo">Open Mod Builder</button><button class="btn" id="hemu">Try the emulator</button></div></div>
+    </div>
+    <div class="panel checks" id="modlist"></div>
+    <div class="panel checks" id="checks"></div>
+  </div>
+</section>
+
+<section class="page" id="p-mods" role="tabpanel">
+  <div class="mods-body">
+    <div class="panel pad scroll">
+      <h2>Pick your mods</h2>
+      <div class="pick" id="pk-theme">
+        <input type="checkbox" id="pk-theme-on" checked disabled>
+        <div class="body"><b>Theme</b><div class="d">Colour theme on the deck's MY SETTINGS menu. Design one in Theme Builder, then send it.</div>
+          <div class="cfg row"><select id="pk-theme-sel" class="field"></select><button class="btn sm" id="pk-theme-send" disabled>Send to deck…</button></div>
+        </div>
+      </div>
+      <div class="pick" id="pk-wave">
+        <input type="checkbox" id="pk-wave-on" checked>
+        <div class="body"><b>Waveform</b><div class="d">The full-track overview on the deck screen.</div>
+          <div class="cfg"><div class="seg" id="wstyle2"><button data-v="blue">Blue</button><button data-v="rgb" class="on">RGB</button><button data-v="3band">3-Band</button></div></div>
+        </div>
+      </div>
+      <div class="pick" id="pk-pads">
+        <input type="checkbox" id="pk-pads-on" checked>
+        <div class="body"><b>PERFORM Pads</b><div class="d">BEAT JUMP, KEY SHIFT and STEMS tabs on the PERFORM screen, plus 8 hot cues: tap HOT CUE again to page A–C / D–F / G–H.</div></div>
+      </div>
+      <div class="pick" id="pk-liveks">
+        <input type="checkbox" id="pk-liveks-on">
+        <div class="body"><b>Live Key Shift</b><div class="d">PERFORM › KEY SHIFT shifts any track −6…+6 semitones while it plays, tempo unchanged (MASTER TEMPO on). Installed live into the deck's audio chip (no restart, the sound never stops), with the stick out. Tested on a real deck: the key moves, the tempo stays.</div></div>
+      </div>
+      <div class="pick" id="pk-phase">
+        <input type="checkbox" id="pk-phase-on">
+        <div class="body"><b>Phase Meter <span class="faint">(beta)</span></b><div class="d">Type 1 meter (like the XDJ-1000MK2): this deck's beats and downbeats scroll past a fixed line above the waveform. Needs PERFORM Pads. The master row stays dim until Pro DJ Link support lands. Not yet tested on a real deck.</div></div>
+      </div>
+      <div class="pick" id="pk-themes">
+        <input type="checkbox" id="pk-themes-on" checked>
+        <div class="body"><b>Theme Switching</b><div class="d">MY SETTINGS › [THEME] steps through all your saved themes on the deck, live. OFF puts the stock colours back exactly.</div></div>
+      </div>
+      <div class="small faint" style="margin-top:12px">Everything runs in the deck's memory — power-cycle the deck and it's stock again. Nothing here can brick it.</div>
+    </div>
+
+    <div class="stack scroll" style="min-height:0">
+      <div class="panel pad">
+        <h2>Your deck</h2>
+        <div class="row" style="margin-bottom:10px"><span class="dot" id="deckdot2"></span><span id="deckline" class="dim">Not connected</span></div>
+        <div class="small dim" id="deckhint" hidden style="margin-bottom:8px"></div>
+        <div class="modsum" id="modsum" style="margin-bottom:12px"></div>
+        <div class="row" style="flex-wrap:wrap">
+          <button class="btn primary" id="deckgo" disabled>Install on deck…</button>
+        </div>
+        <div class="small faint" style="margin-top:8px">Plug the XDJ-700 into this Mac by USB and quit music and MIDI apps first. Takes 15–20 minutes; the log will tell you when to pull the USB stick.</div>
+        <div id="dprog" style="margin-top:10px"></div>
+      </div>
+      <div class="panel pad">
+        <h2>How it works</h2>
+        <dl class="kv small" style="margin:0">
+          <dt>Safe?</dt><dd>Yes — RAM only, every write verified, stops at the first surprise.</dd>
+          <dt>Undo</dt><dd>Power-cycle the deck. That's it.</dd>
+          <dt>After install</dt><dd>Waveforms in your style · BROWSE &gt; MENU &gt; MY SETTINGS has the mod rows (waveform, hot cue gate, vinyl brake length 0.5×–15×).</dd>
+          <dt>Need tracks?</dt><dd>Build 3-band waveforms and stems in Track Builder first.</dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="page" id="p-builder" role="tabpanel">
+  <div class="builder-body">
+    <div class="panel pad scroll">
+      <div id="nothemes" class="notice bad" hidden style="margin-bottom:12px"><div><b>No theme presets loaded.</b><div id="themeerr" class="small" style="user-select:text"></div><div class="small">Project folder: <code id="themeroot"></code>. Presets live in its <code>mods/themes.py</code>; point Settings at the folder that has it.</div></div></div>
+      <div class="sec first">
+        <h2>Theme</h2>
+        <div class="sws" id="sws"></div>
+        <div id="sliders">
+          <div class="ctl"><span>Hue</span><input class="hue" type="range" id="hue" min="0" max="360" step="1"><output id="o-hue"></output></div>
+          <div class="ctl"><span>Vividness</span><input type="range" id="vivid" min="0" max="1" step="0.01"><output id="o-vivid"></output></div>
+          <div class="ctl"><span>Glow</span><input type="range" id="lift" min="0" max="1" step="0.01"><output id="o-lift"></output></div>
+          <div class="ctl"><span>Saturation</span><input type="range" id="sat" min="0.2" max="2.5" step="0.01"><output id="o-sat"></output></div>
+          <div class="ctl"><span>Brightness</span><input type="range" id="val" min="0.5" max="1.5" step="0.01"><output id="o-val"></output></div>
+          <div class="ctl"><span>Shading</span><input type="range" id="spread" min="0" max="1" step="0.01"><output id="o-spread"></output></div>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <input class="field" id="tname" type="text" placeholder="Name this theme (a-z, 0-9, dashes)" spellcheck="false" autocomplete="off">
+          <button class="btn" id="tsave">Save</button>
+        </div>
+      </div>
+      <div class="sec">
+        <h2>Waveform</h2>
+        <div class="seg" id="wstyle"><button data-v="blue" class="on">Blue</button><button data-v="rgb">RGB</button><button data-v="3band">3-Band</button><button data-v="custom">Custom</button></div>
+        <div class="row" id="wcustom" hidden style="margin-top:8px"><label class="small dim" for="customc">Custom colour</label><input type="color" id="customc" value="#6ba3f0"></div>
+        <div class="small dim" id="wnote" style="margin-top:8px"></div>
+      </div>
+      <div class="sec" hidden></div>
+    </div>
+
+    <div class="stack scroll" style="min-height:0">
+      <div class="panel pad">
+        <div class="row" style="margin-bottom:10px">
+          <div class="seg" id="pscreen"><button data-v="main">Player</button><button data-v="perform">Perform</button></div>
+          <span class="small faint grow" id="ptrack" style="text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+        </div>
+        <div class="screen"><img id="pimg" alt="Theme preview of the deck screen"></div>
+        <div class="small faint" style="margin-top:8px">Preview uses the deck's own colour maths. Waveforms follow the track picked in Track Builder.</div>
+      </div>
+    </div>
+  </div>
+  <div class="actionbar">
+    <button class="btn primary" id="testemu">Test in Emulator</button>
+    <span class="small dim">Applies the theme and waveform above to the emulator, then opens it.</span>
+  </div>
+</section>
+
+<section class="page" id="p-tracks" role="tabpanel">
+  <div class="panel lib">
+    <div class="libhead"><h1 id="ltitle">Library</h1><span class="small dim" id="lstats"></span></div>
+    <div id="callout" class="notice" hidden style="margin-bottom:10px"><span id="ctitle"></span><button class="btn sm" id="fixall">Add to all</button></div>
+    <div class="chips">
+      <div class="seg" id="filters"><button data-f="all">All tracks</button><button data-f="need3">Needs 3-band</button><button data-f="vers">Stems files</button></div>
+      <input class="field" id="search" type="text" placeholder="Search" style="margin-left:auto;width:200px" autocomplete="off">
+    </div>
+    <div class="list" id="list"></div>
+    <div class="selbar">
+      <span class="dim" id="selc">Nothing selected</span><span class="grow"></span>
+      <button class="btn" id="b3">Add 3-band</button><button class="btn primary" id="bstems">Make stems</button>
+    </div>
+  </div>
+  <div class="panel insp" id="insp">
+    <div><h2 id="itit" style="font-size:15px;margin:0">Pick a track</h2><div class="meta" id="imeta" style="margin-top:6px"></div></div>
+    <div class="row"><button class="pbtn" id="play" disabled aria-label="Play"><svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" id="pic"><path d="M7 4l13 8-13 8z"/></svg></button><span class="num small" id="ptime">0:00</span></div>
+    <div class="wf" id="wfs">
+      <div class="lbl"><span>RGB</span><span class="faint">rekordbox colours</span></div><img id="w-rgb" alt="">
+      <div class="lbl"><span>3-Band</span><span class="faint">lows, mids, highs</span></div><img id="w-3band" alt="">
+      <div class="lbl"><span>Blue</span><span class="faint">stock look</span></div><img id="w-blue" alt="">
+      <div class="lbl"><span>Custom</span><span class="faint">your colour</span></div><img id="w-custom" alt="">
+      <div class="ph" id="ph"></div>
+    </div>
+    <div class="actions">
+      <button class="btn" id="i3">Add 3-band</button>
+      <button class="btn primary" id="istems" style="grid-column: span 3">Make stems</button>
+    </div>
+    <div id="x7srow" hidden>
+      <div class="lbl"><span>Stems sidecar</span><span class="faint">small opus file present</span></div>
+      <div class="row"><button class="btn primary" id="ix7s" style="flex:1">Build deck stems file</button></div>
+    </div>
+    <div id="x7krow" hidden>
+      <div class="lbl" style="margin-top:8px"><span>Live key shift</span><span class="faint">shift while it plays, no file (proof of the deck feature)</span></div>
+      <div class="row"><input type="range" id="x7klive" min="-4" max="4" step="0.25" value="0" style="flex:1"><span class="num small" id="x7klivev">+0</span></div>
+    </div>
+    <audio id="audio" preload="none"></audio>
+  </div>
+</section>
+
+<section class="page" id="p-emu" role="tabpanel">
+  <div class="stage" id="stage">
+    <div id="deckbox"><img id="deckimg" alt="XDJ-700 emulator" draggable="false"></div>
+  </div>
+  <aside class="side scroll">
+    <div id="emubanner" class="notice bad" hidden></div>
+    <div class="panel stack" style="gap:10px">
+      <div><h2>Firmware</h2><select id="fwsel" style="width:100%"></select></div>
+      <div class="row"><span class="dot" id="emudot"></span><span class="small dim grow" id="emustate">Starting…</span><button class="btn sm" id="emurestart">Restart</button></div>
+      <div class="small faint">Beta: use “real audio DSP” to play tracks. Big libraries take a while to mount the first time; sound can stutter.</div>
+    </div>
+    <div class="panel">
+      <h2>USB stick</h2>
+      <div class="small dim" id="usbline" style="margin-bottom:8px">Nothing inserted. Click below — the deck then reads the whole stick once (up to a minute) before BROWSE lists anything.</div>
+      <div class="row"><button class="btn" id="usbbtn">Insert library</button></div>
+    </div>
+    <div class="panel">
+      <h2>Deck sound</h2>
+      <div class="small dim" id="sndline" style="margin-bottom:6px">Off — press play.</div>
+      <div class="row">
+        <input type="range" id="pitch" min="-8" max="8" step="0.25" value="0" style="flex:1" disabled>
+        <span class="num small" id="pitchv" style="width:34px;text-align:right">0</span>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <label class="row small dim" title="Keep rewriting the deck's Master Tempo ratio word — the full firmware chain, like the deck mod will"><input type="checkbox" id="sndhold"> Drive deck</label>
+        <label class="row small dim"><input type="checkbox" id="sndmute"> Mute</label>
+        <button class="btn sm quiet" id="sndreset" hidden>Follow deck (0)</button>
+      </div>
+      <div class="small faint" id="sndholdinfo" hidden style="margin-top:4px"></div>
+    </div>
+    <div class="panel">
+      <h2>Mods in the emulator</h2>
+      <dl class="kv small" style="margin:0">
+        <dt>Theme</dt><dd id="a-theme">stock</dd>
+        <dt>Waveform</dt><dd id="a-wave">stock</dd>
+        <dt hidden>Beat jump</dt><dd id="a-bj" hidden>gone</dd>
+      </dl>
+      <div id="dirty" class="row small" style="margin-top:10px" hidden><span class="dim grow">Mods tab has changes.</span><button class="btn sm primary" id="applymods">Apply</button></div>
+    </div>
+    <div class="panel">
+      <h2>Keyboard</h2>
+      <div class="keys small dim">
+        <kbd>Space</kbd><span>Play / pause</span><kbd>C</kbd><span>Cue</span>
+        <kbd>I</kbd><span>Loop in</span><kbd>O</kbd><span>Loop out</span>
+        <kbd>R</kbd><span>Reloop</span><kbd>B</kbd><span>Back</span>
+        <kbd>← →</kbd><span>Jog</span><kbd>↑ ↓</kbd><span>Browse</span>
+        <kbd>+ −</kbd><span>Tempo</span><kbd>T</kbd><span>Master tempo</span>
+        <kbd>V</kbd><span>Vinyl</span><kbd>G</kbd><span>Tempo range</span>
+        <kbd>[ ]</kbd><span>Track</span><kbd>, .</kbd><span>Search</span>
+      </div>
+      <div class="small faint" style="margin-top:8px">Scroll over the deck to turn the browse knob.</div>
+    </div>
+  </aside>
+</section>
+
+<section class="page" id="p-upd" role="tabpanel">
+  <div class="settings">
+    <div class="notice bad" style="flex-direction:column;gap:6px">
+      <b style="font-size:15px">Danger zone: this makes a FIRMWARE file you flash yourself.</b>
+      <div>Every other mod in this app lives in the deck's memory, and switching the deck off and on removes it. A permanent update does <b>not</b> go away when you switch off.</div>
+      <ul style="margin:4px 0 0 18px;padding:0;line-height:1.5">
+        <li><b>It can brick your deck.</b> A bad file, a power cut or pulling the stick mid-update can leave the XDJ-700 needing a Pioneer DJ service centre.</li>
+        <li><b>Never tested on a real deck yet.</b> Every file is boot-tested in the emulator before you get it, but the emulator cannot prove a real flash.</li>
+        <li><b>No warranty.</b> Pioneer DJ / AlphaTheta do not support modified firmware.</li>
+        <li><b>The way back</b> is to flash the official v1.15 file, so keep it on a second stick.</li>
+      </ul>
+    </div>
+    <div class="panel stack" style="gap:10px">
+      <div><h2>1. Your official update file</h2><div class="small dim">The <code>XDJ700.UPD</code> for firmware 1.15 from Pioneer DJ's XDJ-700 support page. Anything else is refused.</div></div>
+      <div class="row"><input class="field" id="updpath" type="text" placeholder="~/Downloads/XDJ700.UPD" spellcheck="false" autocomplete="off"><button class="btn" id="updpick">Choose…</button></div>
+    </div>
+    <div class="panel stack" style="gap:10px">
+      <div><h2>2. What to bake in</h2><div class="small dim">Baked-in mods stay on the deck after power-off.</div></div>
+      <div class="row"><span class="dim" style="width:150px">Overview waveform</span><div class="seg" id="updwave"><button data-v="blue">Blue</button><button data-v="rgb" aria-pressed="true">RGB</button><button data-v="3band">3-Band</button></div></div>
+      <label class="row"><input type="checkbox" id="updpads" checked> PERFORM pads: HOT CUE / BEAT JUMP / KEY SHIFT / STEMS tabs, beat jump 1–64</label>
+      <div class="bake">
+        <div><div class="bakeh ok">Baked into the file</div><ul>
+          <li>Overview waveform (blue, RGB or 3-band)</li>
+          <li>PERFORM tabs and beat jump pads (if ticked)</li>
+          <li>MY SETTINGS rows: [MODS], [WAVEFORM], [VINYL BRAKE] (always)</li>
+          <li>Version 1.16 in UTILITY, so you can tell it apart</li></ul></div>
+        <div><div class="bakeh">Can't be baked: install over USB from Mods</div><ul>
+          <li>RGB / 3-band centre waveform (the file keeps the stock blue centre)</li>
+          <li>Live key shift (the KEY SHIFT tab needs it)</li>
+          <li>Live stems (the STEMS tab needs it)</li>
+          <li>Live themes ([THEME] in MY SETTINGS needs it)</li>
+          <li>8 hot cues, phase meter, FLAC &amp; Opus</li></ul>
+          <div class="small faint">These live outside the space the firmware file has room for.</div></div>
+      </div>
+    </div>
+    <div class="panel stack" style="gap:8px">
+      <h2>3. I understand</h2>
+      <label class="row"><input type="checkbox" class="updack" data-k="brick"> Flashing this can brick my deck, and I am doing it at my own risk.</label>
+      <label class="row"><input type="checkbox" class="updack" data-k="recovery"> I have the official v1.15 update on a second USB stick to go back to stock.</label>
+      <label class="row"><input type="checkbox" class="updack" data-k="power"> I will keep the deck on mains power and not touch it or the stick until the update says it is complete.</label>
+      <div class="row"><button class="btn primary" id="updbtn" disabled>Build update file</button><span class="small dim" id="updmsg">Takes about 5 minutes. The file goes to Downloads / “XDJ700 modded update”, with a READ ME FIRST.</span></div>
+      <div class="small faint">The app only builds the file and boot-tests it in the emulator. It never flashes your deck. You run the update yourself, the normal Pioneer way.</div>
+    </div>
+  </div>
+</section>
+<section class="page" id="p-settings" role="tabpanel">
+  <div class="settings">
+    <div class="panel stack" style="gap:10px">
+      <div><h2>Updates</h2><div class="small dim">You have version <b id="upcur"></b>. The app checks GitHub for a newer release; nothing is downloaded until you press the button.</div></div>
+      <div class="row"><span class="dot" id="updot"></span><span class="dim" id="upline">Checking…</span></div>
+      <div class="small dim" id="upnotes" hidden style="white-space:pre-wrap;max-height:160px;overflow:auto;background:var(--raise);border-radius:7px;padding:8px 10px"></div>
+      <div class="row"><button class="btn primary" id="upget" hidden>Download update</button><button class="btn" id="upcheck">Check now</button><button class="btn quiet" id="uppage">Open release page</button></div>
+      <div class="small faint">The download goes to your Downloads folder. Quit the app, open the zip and drag the new app over the old one. Your settings, firmware setup and themes are kept.</div>
+    </div>
+    <div class="panel stack" style="gap:10px">
+      <div><h2>Library</h2><div class="small dim">The USB stick or rekordbox export folder (the one holding <code>PIONEER</code>). Used by Track Builder and by the emulator's USB stick.</div></div>
+      <div class="row"><input class="field" id="stick" type="text" placeholder="/Volumes/USB" spellcheck="false" autocomplete="off"><button class="btn" id="stickpick">Choose…</button></div>
+      <div class="row"><button class="btn primary" id="stickbtn">Use this folder</button><span class="small dim" id="stickmsg"></span></div>
+    </div>
+    <div class="panel stack" style="gap:10px">
+      <div><h2>Project folder</h2><div class="small dim">Holds the firmware (<code>XDJ700.UPD</code> or <code>FIRMWARE</code>), <code>mods</code>, <code>cache</code> and <code>build</code>. The firmware is yours to provide; it is never bundled.</div></div>
+      <div class="row"><input class="field" id="project" type="text" spellcheck="false" autocomplete="off"><button class="btn" id="projpick">Choose…</button></div>
+      <div class="row"><button class="btn" id="projbtn">Use this folder</button><span class="small dim" id="projmsg"></span></div>
+    </div>
+    <div class="panel stack" style="gap:8px">
+      <h2>Stem separation</h2>
+      <div class="row"><span class="dot" id="dmdot"></span><span class="dim" id="dmline"></span></div>
+      <div class="small faint">Install on Wi-Fi (about 2–3 GB, in its own environment): <code>bash studio/install_demucs.sh</code></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<div id="act"><div class="acth">Activity <button class="btn sm quiet" id="actx">Close</button></div><div id="jobs"><div class="empty">Nothing has run yet.</div></div></div>
+<div id="toast" aria-live="polite"></div>
+
+<dialog id="dlg"><h2 id="dtitle"></h2><div class="dim" id="dbody"></div><div id="dextra"></div>
+  <div class="dlgfoot"><button class="btn" id="dno">Cancel</button><button class="btn primary" id="dyes">OK</button></div></dialog>
+
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtT = s => s ? `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}` : '';
+const fmtEta = s => s >= 5400 ? `about ${(s / 3600).toFixed(1)} h` : s >= 90 ? `about ${Math.round(s / 60)} min` : s >= 15 ? `about ${Math.max(10, Math.round(s / 10) * 10)} s` : 'a few seconds';
+
+function toast(msg, bad) {
+  const d = document.createElement('div'); d.textContent = msg; if (bad) d.className = 'bad';
+  $('#toast').appendChild(d); setTimeout(() => d.remove(), bad ? 6000 : 3500);
+}
+async function api(p, body) {
+  try {
+    const r = await fetch(p, body ? {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)} : {});
+    const j = await r.json();
+    if (j && j.error) { toast(j.error, true); return null; }
+    return j;
+  } catch (e) { toast('Studio is not responding.', true); return null; }
+}
+// in-page dialog: alert()/confirm() do nothing inside the Mac app's web view
+function ask(title, body, yes = 'OK', extra = '') {
+  return new Promise(res => {
+    $('#dtitle').textContent = title; $('#dbody').textContent = body; $('#dextra').innerHTML = extra;
+    $('#dyes').textContent = yes;
+    const d = $('#dlg'); const done = v => { d.close(); res(v); };
+    $('#dyes').onclick = () => done(true); $('#dno').onclick = () => done(false); d.oncancel = () => res(false);
+    d.showModal();
+  });
+}
+// native folder chooser when running inside the Mac app
+const picks = {};
+window.__xdjPicked = (id, path) => { if (picks[id]) picks[id](path || null); delete picks[id]; };
+function pickFolder(prompt) {
+  const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xdj;
+  if (!h) { toast('Type the folder path, then press “Use this folder”.'); return Promise.resolve(null); }
+  return new Promise(res => { const id = String(Math.random()); picks[id] = res; h.postMessage({type: 'pickFolder', id, prompt}); });
+}
+
+function pickFile(prompt) {
+  const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.xdj;
+  if (!h) return Promise.resolve(prompt && window.prompt(prompt + ' (full path)') || null);
+  return new Promise(res => { const id = String(Math.random()); picks[id] = res; h.postMessage({type: 'pickFile', id, prompt}); });
+}
+
+let ST = {}, LIB = {tracks: [], versions: []}, CUR = null, SEL = new Set(), FILTER = 'all', TAB = 'home';
+const segSet = (id, v) => $$(`#${id} button`).forEach(b => b.setAttribute('aria-pressed', (b.dataset.v ?? b.dataset.f) === v));
+
+function showTab(t) {
+  TAB = t;
+  if (t === 'home') renderHome();
+  $$('.tabs button').forEach(b => b.setAttribute('aria-selected', b.dataset.p === t));
+  $$('.page').forEach(p => p.classList.toggle('on', p.id === 'p-' + t));
+  if (t === 'builder') preview();
+  if (t === 'emu') emuOpen(); else emuClose();
+  if (t === 'tracks' && !LIB.loaded) load();
+  if (t === 'settings') fillSettings();
+}
+$$('.tabs button').forEach(b => b.onclick = () => showTab(b.dataset.p));
+$('#actbtn').onclick = () => $('#act').classList.toggle('on');
+$('#actx').onclick = () => $('#act').classList.remove('on');
+
+async function state() {
+  const s = await api('/api/state'); if (!s) return; ST = s;
+  if (s.upd && !$('#updpath').value) { $('#updpath').value = s.upd; updReady(); }
+  $('#deckdot').className = 'dot ' + (s.deck ? 'ok' : ''); $('#decktxt').textContent = s.deck ? 'Deck connected' : 'No deck';
+  $('#deckdot2').className = 'dot ' + (s.deck ? 'ok' : ''); $('#deckline').textContent = s.deck ? 'XDJ-700 connected' : 'Not connected';
+  const hint = $('#deckhint');
+  hint.hidden = s.deck || !s.deck_err; hint.textContent = s.deck_err || '';
+  $('#deckgo').disabled = !s.deck; $('#pk-theme-send').disabled = !s.deck;
+  $('#dmdot').className = 'dot ' + (s.demucs ? 'ok' : 'warn'); $('#dmline').textContent = s.demucs ? 'Demucs is installed.' : 'Demucs is not installed. “Make stems” needs it.';
+  renderHome(); renderPick();
+  $('#nothemes').hidden = s.themes_ok; $('#themeerr').textContent = s.themes_err || ''; $('#themeroot').textContent = s.project || '';
+  swatches(); themeSelect();
+  if (s.mods && !PICK.touched) {
+    if (['blue', 'rgb', '3band'].includes(s.mods.mode)) PICK.wave = s.mods.mode;
+    segSet('wstyle2', PICK.wave);
+  }
+}
+
+/* ---- Home */
+const TICK = '<span class="tick"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5l5.5 5.5L20 6.5"/></svg></span>';
+const HOME_MODS = () => [
+  {n: 'Themes', ok: ST.themes_ok, d: ST.themes_ok ? `${Object.keys(ST.themes || {}).length} presets — make your own in Theme Builder` : 'theme engine missing', go: 'builder'},
+  {n: 'Waveforms', ok: true, d: 'RGB, 3-band or your own colour', go: 'mods'},
+  {n: 'Live Key Shift', ok: true, d: 'shift key while it plays, tempo stays put', go: 'mods'},
+  {n: 'Stems', ok: ST.demucs, d: ST.demucs ? 'vocals / drums / bass / other, muted live on the deck' : 'needs Demucs — see Settings', go: ST.demucs ? 'tracks' : 'settings'},
+  {n: 'PERFORM Pads', ok: true, d: 'BEAT JUMP, KEY SHIFT and STEMS tabs on the deck', go: 'mods'},
+  {n: 'Extra Hot Cues', ok: true, d: '8 hot cues on the deck now (pages A–C / D–F / G–H); more pages may come', go: 'mods'},
+  {n: 'Vinyl Brake Length', ok: true, d: 'MY SETTINGS › [VINYL BRAKE] on the deck (emulator-tested)', go: 'mods'},
+];
+$('#dimples').innerHTML = Array.from({length: 36}, (_, k) => { const a = k / 36 * Math.PI * 2; return `<circle cx="${75 + 46 * Math.cos(a)}" cy="${75 + 46 * Math.sin(a)}" r="1.8"/>`; }).join('');
+$('#hgo').onclick = () => showTab('mods'); $('#hemu').onclick = () => showTab('emu');
+function renderHome() {
+  if (!ST.project) return;
+  // the mod list: what this app gives the deck
+  $('#modlist').innerHTML = '<h2 style="margin-top:10px">Mods</h2>' + HOME_MODS().map(m =>
+    `<div class="modrow ${m.go ? 'click' : ''}" ${m.go ? `data-go="${m.go}"` : ''}>${m.soon ? '<span class="tick soon">?</span>' : m.ok ? TICK : '<span class="tick off"></span>'}
+     <b>${esc(m.n)}</b><span class="d ${m.ok ? '' : 'warn'}" title="${esc(m.d)}">${esc(m.d)}</span>${m.go ? '<span class="faint small">Open ›</span>' : ''}</div>`).join('');
+  $$('#modlist [data-go]').forEach(b => b.onclick = () => showTab(b.dataset.go));
+  // setup checks
+  const nm = p => (p || '').split('/').filter(Boolean).pop();
+  const nth = Object.keys(ST.themes || {}).length, fw = (ST.firmware || [])[0];
+  const items = [
+    ['Project folder', ST.project_ok, ST.project_ok ? ST.project : 'No tools folder found at ' + ST.project, 'settings', 'Choose'],
+    ['Firmware', ST.fw_ready, ST.fw_ready ? 'XDJ-700 v1.15 (from your own update file)' : 'Add the official XDJ-700 v1.15 update file (from Pioneer DJ) — about 3 minutes, once', 'firmware', 'Add'],
+    ['Theme presets', ST.themes_ok, ST.themes_ok ? nth + ' presets loaded' : (ST.themes_err || 'mods/themes.py not found'), 'settings', 'Fix'],
+    ['Library', ST.stick_ok, ST.stick_ok ? nm(ST.stick) : 'No USB stick or export folder chosen', 'settings', 'Choose'],
+    ['XDJ-700 deck', ST.deck, ST.deck ? 'Connected over USB' : 'Not connected (only needed to install mods)', null, null]];
+  $('#checks').innerHTML = '<h2 style="margin-top:10px">Setup</h2>' + items.map(([n, ok, d, go, btn], i) => `<div class="chk"><span class="dot ${ok ? 'ok' : i === 4 ? '' : 'warn'}"></span><b>${n}</b><span class="d" title="${esc(d)}">${esc(d)}</span>${!ok && go ? `<button class="btn sm" data-fix="${go}">${btn}</button>` : ''}</div>`).join('');
+  $$('[data-fix]').forEach(b => b.onclick = () => b.dataset.fix === 'firmware' ? addFirmware() : showTab(b.dataset.fix));
+  const ready = ST.project_ok && ST.fw_ready && ST.themes_ok;
+  $('#hero').classList.toggle('ready', !!ready);
+  $('#hhead').textContent = ready ? 'Ready to mod your XDJ-700?' : 'Almost ready';
+  $('#hsub').textContent = ready ? 'Pick your mods, build your tracks, test on the emulator — then install everything on the deck.' : 'A few things need attention below before the emulator and themes can work.';
+}
+
+async function addFirmware() {
+  const p = await pickFile('Choose the XDJ-700 v1.15 update file (XDJ700…UPD) from Pioneer DJ');
+  if (!p) return;
+  const r = await api('/api/firmware/setup', {path: p});
+  if (r) { toast('Setting up your firmware — about 3 minutes.'); watch(); }
+}
+
+
+/* ---- Permanent (UPD) */
+const UPD = {wave: 'rgb'};
+function updReady() {
+  const acks = $$('.updack').every(c => c.checked);
+  $('#updbtn').disabled = !(acks && $('#updpath').value.trim());
+}
+$$('#updwave button').forEach(b => b.onclick = () => { UPD.wave = b.dataset.v; segSet('updwave', UPD.wave); });
+$$('.updack').forEach(c => c.onchange = updReady);
+$('#updpath').oninput = updReady;
+$('#updpick').onclick = async () => {
+  const p = await pickFile('Choose the OFFICIAL XDJ-700 v1.15 update file (XDJ700.UPD)');
+  if (p) { $('#updpath').value = p; updReady(); }
+};
+$('#updbtn').onclick = async () => {
+  const ok = await ask('Build a permanent update file?',
+    'This builds a modified firmware file and boot-tests it in the emulator. Flashing it to the deck is your decision, made later, at your own risk: it can brick the deck. Nothing is flashed by the app.',
+    'Build the file');
+  if (!ok) return;
+  const ack = {}; $$('.updack').forEach(c => ack[c.dataset.k] = c.checked);
+  const r = await api('/api/upd/build', {path: $('#updpath').value.trim(), mode: UPD.wave,
+    pads: $('#updpads').checked, versions: false, ack});
+  if (r) { toast('Building + boot-testing — about 5 minutes.'); watch(); }
+};
+
+/* ---- Mods (the mod builder) */
+const PICK = {wave: 'rgb', touched: false};
+function themeSelect() {
+  const sel = $('#pk-theme-sel'), names = Object.keys(ST.themes || {});
+  sel.innerHTML = '<option value="stock">Stock look</option>' + names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (PICK.theme && names.includes(PICK.theme)) sel.value = PICK.theme; else PICK.theme = 'stock';
+}
+function renderPick() {
+  $$('#p-mods .pick').forEach(pk => {
+    const cb = pk.querySelector('input[type=checkbox]');
+    if (cb && !cb.disabled) pk.classList.toggle('off', !cb.checked);
+  });
+  const parts = [];
+  if ($('#pk-wave-on').checked) parts.push($('#pk-wave-on').checked ? `Waveform ${$$('#wstyle2 button').find(b => b.getAttribute('aria-pressed') === 'true')?.dataset.v.toUpperCase()}` : '');
+  if ($('#pk-pads-on').checked) parts.push('PERFORM pads');
+  if ($('#pk-themes-on').checked) parts.push('Theme switching');
+  if ($('#pk-liveks-on').checked) parts.push('Live key shift');
+  if ($('#pk-phase-on').checked) parts.push('Phase meter');
+  $('#modsum').innerHTML = parts.map(p => `<span>${esc(p)}</span>`).join('') || '<span>nothing selected</span>';
+}
+$$('#p-mods .pick input[type=checkbox]').forEach(cb => cb.onchange = () => { PICK.touched = true; renderPick(); });
+$$('#wstyle2 button').forEach(b => b.onclick = () => { PICK.wave = b.dataset.v; PICK.touched = true; segSet('wstyle2', PICK.wave); renderPick(); });
+$('#pk-theme-sel').onchange = e => PICK.theme = e.target.value;
+$('#pk-theme-send').onclick = async () => {
+  const name = PICK.theme;
+  if (!(ST.themes || {})[name] || name === 'stock') return toast('Pick a saved theme first (save it in Theme Builder).', true);
+  if (await ask(`Put your themes on the deck?`, `Installs theme switching with all your saved themes (incl. “${name}”). On the deck: BROWSE › MENU › MY SETTINGS › [THEME] — each push steps to the next theme, OFF restores stock. About 5 minutes; runs in the deck's memory only.`, 'Install'))
+    api('/api/theme/deck', {name}).then(r => r && watch());
+};
+$('#deckgo').onclick = async () => {
+  const wave = PICK.wave === 'custom' ? 'blue' : PICK.wave;
+  const pads = $('#pk-pads-on').checked;
+  const themes = $('#pk-themes-on').checked, liveks = $('#pk-liveks-on').checked, phase = $('#pk-phase-on').checked && pads;
+  const parts = [`waveform ${wave.toUpperCase()}`];
+  if (pads) parts.push('PERFORM pads');
+  if (themes) parts.push('theme switching');
+  if (liveks) parts.push('live key shift');
+  if (phase) parts.push('phase meter');
+  // same session plan as the server (studio/app.py INSTALL_STEPS, ~50 s each)
+  const mins = Math.round(((ST.surveyed ? 1 : 5) + 3 + 1 + 1 + 1 + 1 + (pads ? 2 : 0) + (themes ? 4 : 0) + (liveks ? 2 : 0) + (phase ? 3 : 0)) * 55 / 60);
+  if (await ask('Install mods on the deck?',
+    `${parts.join(' · ')}. It takes about ${mins} minutes, plus the moment you eject the stick when asked. Keep the USB stick out of the deck until the log asks for it. Power-cycle the deck any time to go back to stock.`, 'Install'))
+    api('/api/deck/install', {mode: wave, pads, themes, liveks, phase}).then(r => r && watch());
+};
+
+/* ---- Theme Builder */
+const SL = ['hue', 'vivid', 'lift', 'sat', 'val', 'spread'];
+const DEF = {hue: 210, vivid: 0, lift: 0, sat: 1, val: 1, spread: 0.5};
+const MOD = {theme: 'stock', wave: 'blue', custom: localStorage.getItem('wave_custom') || '#6ba3f0', touched: false};
+let pscreen = 'main', pt = null, applied = null;
+const spec = () => Object.fromEntries(SL.map(k => [k, +$('#' + k).value]));
+
+function swatches() {
+  const th = Object.assign({stock: {spec: null, swatch: ['#29487a', '#3b5f99']}}, ST.themes || {});
+  $('#sws').innerHTML = Object.entries(th).map(([n, t]) => `<button class="sw" aria-pressed="${n === MOD.theme}" data-n="${esc(n)}" title="${esc(n)}">
+    <i style="background:linear-gradient(135deg, ${t.swatch[0]} 50%, ${t.swatch[1]} 50%)"></i><span>${esc(n)}</span></button>`).join('');
+  $$('.sw').forEach(b => b.onclick = () => { MOD.theme = b.dataset.n; MOD.touched = true; usePreset(); swatches(); markDirty(); });
+}
+function usePreset() {
+  const t = ((ST.themes || {})[MOD.theme] || {}).spec;
+  SL.forEach(k => $('#' + k).value = t ? (t[k] ?? DEF[k]) : DEF[k]);
+  $('#tname').value = MOD.theme === 'stock' || MOD.theme === 'custom' ? '' : MOD.theme;
+  preview();
+}
+function wopts() {
+  if (MOD.wave === 'custom') return {style: 'custom', custom: MOD.custom};
+  return {style: MOD.wave};
+}
+function preview() {
+  if (TAB !== 'builder') return;
+  SL.forEach(k => $('#o-' + k).textContent = k === 'hue' ? Math.round($('#' + k).value) + '°' : (+$('#' + k).value).toFixed(2));
+  if ($('#customc') && MOD.custom) $('#customc').value = MOD.custom;
+  $('#wcustom').hidden = MOD.wave !== 'custom';
+  $('#wnote').textContent = {blue: 'Stock XDJ-700 blue waveform.', rgb: 'Each track shows its own rekordbox colours.', '3band': 'Lows in the core, mids, then highs on the outside -- on both the overview and the centre waveform.',
+    custom: 'Your colour, stock waveform shape.'}[MOD.wave];
+  clearTimeout(pt);
+  pt = setTimeout(() => {
+    const p = MOD.theme === 'stock' ? {hue: 'stock'} : spec();
+    $('#pimg').src = '/api/preview?' + new URLSearchParams({...p, ...wopts(), screen: pscreen, wave: 0, track: CUR || ''});
+    const t = CUR && track(CUR);
+    $('#ptrack').textContent = t ? t.title : 'Pick a track in Track Builder to preview its waveforms';
+  }, 90);
+}
+SL.forEach(k => $('#' + k).oninput = () => { MOD.theme = 'custom'; MOD.touched = true; swatches(); preview(); markDirty(); });
+$$('#wstyle button').forEach(b => b.onclick = () => { MOD.wave = b.dataset.v; MOD.touched = true; segSet('wstyle', MOD.wave); preview(); markDirty(); });
+$('#customc').oninput = e => { MOD.custom = e.target.value; try { localStorage.setItem('wave_custom', MOD.custom); } catch (_) {} MOD.touched = true; preview(); markDirty(); };
+$$('#pscreen button').forEach(b => b.onclick = () => { pscreen = b.dataset.v; segSet('pscreen', pscreen); preview(); });
+  PICK.wave = 'blue';
+
+$('#tsave').onclick = async () => {
+  const name = $('#tname').value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) return toast('Name the theme with lowercase letters, numbers and dashes.', true);
+  if (!ST.themes_ok) return toast('Theme engine not found. Choose the project folder in Settings.', true);
+  const r = await api('/api/theme/save', {name, spec: spec()}); if (!r) return;
+  watch(); toast(`Saving “${name}”…`);
+  setTimeout(async () => { await state(); MOD.theme = name; swatches(); }, 2500);
+};
+
+/* Theme Builder -> emulator hand-off */
+function draftMods() {
+  const t = MOD.theme === 'stock' ? null : {name: MOD.theme, spec: spec()};
+  return {theme: t, wave: MOD.wave};
+}
+async function applyMods() {
+  const d = draftMods();
+  const r = await api('/api/emu/cmd', {cmd: 'mods', ...d}); if (!r) return false;
+  applied = JSON.stringify(d); markDirty(); return true;
+}
+function markDirty() { $('#dirty').hidden = applied === null || applied === JSON.stringify(draftMods()); }
+$('#testemu').onclick = async () => { if (await applyMods()) showTab('emu'); };
+$('#applymods').onclick = applyMods;
+
+/* ---- Emulator: the real emu/ui.py deck, streamed */
+const E = {open: false, aspect: 1368 / 1614, q: [], busy: false, w: 0, timer: null, down: false};
+let EMU_NOTE_SHOWN = false;
+function emuBetaNote() {
+  let seen = EMU_NOTE_SHOWN;
+  try { seen = seen || localStorage.getItem('emu_beta_note') === '1'; } catch (_) {}
+  if (seen) return;
+  EMU_NOTE_SHOWN = true;
+  try { localStorage.setItem('emu_beta_note', '1'); } catch (_) {}
+  const no = $('#dno'); const was = no.style.display; no.style.display = 'none';
+  ask('The emulator is a beta',
+    'It runs your own XDJ-700 firmware on the Mac so you can try the mods without the deck. Good to know before you start:',
+    'Got it',
+    '<ul class="small" style="margin:8px 0 0 18px;line-height:1.5">' +
+    '<li><b>Sound stutters.</b> The emulated audio chip runs slower than a real deck, so playback comes out in bursts. Browsing, loading and the screens are fine.</li>' +
+    '<li><b>Choose “real audio DSP”</b> in Firmware to play tracks. The “instant” choice cannot play and shows “CANNOT PLAY TRACK”.</li>' +
+    '<li><b>The first insert of a big library</b> takes a while: the deck reads the whole stick once.</li>' +
+    '<li><b>“rekordbox Database not found!”</b> on the main screen is normal until you open BROWSE.</li>' +
+    '<li><b>Key shift and stem mutes</b> are slow or silent here; they are made for the real deck.</li>' +
+    '</ul>').then(() => { no.style.display = was; });
+}
+async function emuOpen() {
+  E.open = true;
+  emuBetaNote();
+  await api('/api/emu/cmd', {cmd: 'start'});
+  if (!E.open) return;
+  emuFit(); emuPoll();
+  if (!E.timer) E.timer = setInterval(emuPoll, 1000);
+}
+function emuClose() {
+  if (!E.open) return;
+  E.open = false; clearInterval(E.timer); E.timer = null; E.w = 0;
+  emuSend({t: 'release'}); $('#deckimg').removeAttribute('src');
+}
+function emuFit() {
+  if (!E.open) return;
+  const s = $('#stage').getBoundingClientRect(), pad = 16;
+  const aw = s.width - pad * 2, ah = s.height - pad * 2; if (aw < 50 || ah < 50) return;
+  const w = Math.floor(Math.min(aw, ah * E.aspect)), h = Math.floor(w / E.aspect);
+  const bx = $('#deckbox'); bx.style.width = w + 'px'; bx.style.height = h + 'px';
+  const want = Math.min(1368, Math.ceil(w * (window.devicePixelRatio || 1) / 100) * 100);
+  if (want !== E.w || !$('#deckimg').getAttribute('src')) { E.w = want; $('#deckimg').src = `/api/emu/stream?w=${want}&t=${Date.now()}`; }
+}
+new ResizeObserver(() => emuFit()).observe($('#stage'));
+
+async function emuPoll() {
+  const s = await api('/api/emu/state'); if (!s || !E.open) return;
+  if (s.deck) E.aspect = s.deck[0] / s.deck[1];
+  const sel = $('#fwsel'), sig = (s.firmwares || []).map(f => f.id + f.label).join('|');
+  if (sel.dataset.sig !== sig) { sel.dataset.sig = sig; sel.innerHTML = (s.firmwares || []).map(f => `<option value="${esc(f.id)}">${esc(f.label)}</option>`).join(''); }
+  if (s.firmware_id && document.activeElement !== sel) sel.value = s.firmware_id;
+  const st = {running: ['ok', 'Running'], booting: ['run', `Booting the deck ${Math.round((s.progress || 0) * 100)}% — the real deck takes about a minute from power-on`], loading: ['run', 'Loading…'],
+    crashed: ['bad', 'Crashed: ' + (s.crash || '')], error: ['bad', 'Stopped'], idle: ['', 'Starting…']}[s.state] || ['', s.state];
+  $('#emudot').className = 'dot ' + st[0]; $('#emustate').textContent = s.state === 'booting' ? st[1] : (s.status && s.state !== 'booting' ? s.status : st[1]);
+  const bad = s.error || (s.state === 'error' && s.status);
+  const bn = $('#emubanner'); bn.hidden = !bad;
+  if (bad) { bn.innerHTML = esc(s.error || s.status) + ' <button class="btn sm" id="togo">Settings</button>'; $('#togo').onclick = () => showTab('settings'); }
+  $('#a-theme').textContent = s.theme || 'stock';
+  $('#a-wave').textContent = s.stock ? (s.wave === 'blue' ? 'stock' : s.wave) : 'from the build';
+  $('#a-bj') && ($('#a-bj').textContent = '');
+  const nm = p => (p || '').split('/').filter(Boolean).pop();
+  $('#usbline').textContent = s.usb ? `Inserted: ${nm(s.usb)}` : (ST.stick_ok ? `Library: ${nm(ST.stick)}` : 'No library folder chosen yet.');
+  $('#usbbtn').textContent = s.usb ? 'Eject' : 'Insert library'; $('#usbbtn').dataset.in = s.usb ? '1' : '';
+  sndUpdate(s.sound);
+  markDirty();
+}
+$('#fwsel').onchange = e => api('/api/emu/cmd', {cmd: 'boot', id: e.target.value});
+$('#emurestart').onclick = () => api('/api/emu/cmd', {cmd: 'restart'});
+$('#usbbtn').onclick = async () => {
+  if ($('#usbbtn').dataset.in) return api('/api/emu/cmd', {cmd: 'usb_eject'});
+  if (!ST.stick_ok) { toast('Choose your library folder first.'); return showTab('settings'); }
+  $('#usbline').textContent = `Inserting ${nm(ST.stick)}…`;   // insert -> mount takes up to ~1 min on screen
+  const r = await api('/api/emu/cmd', {cmd: 'usb_insert'});
+  if (r) toast('Stick going in — the deck reads the whole stick once, which can take a minute before BROWSE lists tracks.');
+  else $('#usbline').textContent = 'Insert failed — is the emulator running?';
+};
+
+/* deck sound: live pitch on the emulator's audio (key-shift preview) */
+let PITCH_SEND = null, PITCH_LOCAL = 0;
+function sndUpdate(s) {
+  s = s || {on: false};
+  const line = $('#sndline'), slider = $('#pitch');
+  slider.disabled = !s.on;
+  $('#sndmute').disabled = !s.on;
+  line.textContent = !s.on ? 'Off — press play.'
+    : (s.playing && !s.muted ? (s.track ? `Playing ${s.track}` : 'Playing')
+       : s.muted ? 'Muted.' : 'Paused.');
+  if (s.follows_firmware) { $('#pitchv').textContent = (s.pitch > 0 ? '+' : '') + s.pitch; }
+  $('#sndreset').hidden = s.follows_firmware !== false;
+  const hi = $('#sndholdinfo');
+  hi.hidden = !(s.hold != null);
+  if (s.hold != null) hi.textContent = `driving the deck's ratio word: mailbox held ${Math.round((s.hold_duty || 0) * 100)}% of ticks`;
+}
+$('#pitch').oninput = e => {
+  PITCH_LOCAL = +e.target.value;
+  $('#pitchv').textContent = (PITCH_LOCAL > 0 ? '+' : '') + PITCH_LOCAL;
+  $('#sndreset').hidden = false;
+  clearTimeout(PITCH_SEND);
+  PITCH_SEND = setTimeout(() =>
+    api('/api/emu/cmd', {cmd: 'pitch', semis: PITCH_LOCAL || 0,
+                         hold: $('#sndhold').checked}), 250);
+};
+$('#sndhold').onchange = e => {
+  if (PITCH_LOCAL) api('/api/emu/cmd', {cmd: 'pitch', semis: PITCH_LOCAL, hold: e.target.checked});
+};
+$('#sndreset').onclick = () => api('/api/emu/cmd', {cmd: 'pitch', semis: null});
+$('#sndmute').onchange = e => api('/api/emu/cmd', {cmd: 'mute', muted: e.target.checked});
+
+/* browser input -> the emulator's own input API */
+function emuSend(ev) {
+  if (ev.t === 'move' && E.q.length && E.q[E.q.length - 1].t === 'move') E.q[E.q.length - 1] = ev; else E.q.push(ev);
+  if (!E.busy) emuFlush();
+}
+async function emuFlush() {
+  if (!E.q.length) return; E.busy = true;
+  const events = E.q; E.q = [];
+  try { await fetch('/api/emu/input', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({events})}); } catch (e) {}
+  E.busy = false; if (E.q.length) emuFlush();
+}
+const box = $('#deckbox');
+const pos = e => { const r = box.getBoundingClientRect(); return {x: (e.clientX - r.left) / r.width, y: (e.clientY - r.top) / r.height}; };
+box.addEventListener('pointerdown', e => { if (e.button !== 0) return; box.setPointerCapture(e.pointerId); E.down = true; emuSend({t: 'down', ...pos(e)}); e.preventDefault(); });
+box.addEventListener('pointermove', e => { if (E.down) emuSend({t: 'move', ...pos(e)}); });
+const upEv = () => { if (!E.down) return; E.down = false; emuSend({t: 'up'}); };
+box.addEventListener('pointerup', upEv); box.addEventListener('pointercancel', upEv); box.addEventListener('lostpointercapture', upEv);
+box.addEventListener('contextmenu', e => e.preventDefault());
+let wheelAcc = 0;
+box.addEventListener('wheel', e => {
+  e.preventDefault(); wheelAcc += e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+  const n = Math.trunc(wheelAcc / 40); if (n) { wheelAcc -= n * 40; emuSend({t: 'rot', n}); }
+}, {passive: false});
+const KEYMAP = {' ': 'space', ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down'};
+const KEYS = new Set(['space', 'left', 'right', 'up', 'down', 'c', 'i', 'o', 'r', 't', 'g', 'v', 'b', 'y', '[', ']', ',', '.', '=', '+', '-']);
+const keyName = e => { const k = KEYMAP[e.key] || e.key.toLowerCase(); return KEYS.has(k) ? k : null; };
+const typing = e => e.target.matches('input, textarea, select');
+window.addEventListener('keydown', e => {
+  if (TAB !== 'emu' || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = keyName(e); if (!k) return; e.preventDefault(); if (!e.repeat) emuSend({t: 'key', k, d: 1});
+});
+window.addEventListener('keyup', e => { if (TAB !== 'emu' || typing(e)) return; const k = keyName(e); if (k) { e.preventDefault(); emuSend({t: 'key', k, d: 0}); } });
+window.addEventListener('blur', () => { if (TAB === 'emu') emuSend({t: 'release'}); });
+document.addEventListener('visibilitychange', () => { if (document.hidden && TAB === 'emu') emuSend({t: 'release'}); });
+
+/* ---- Track Builder */
+async function load() {
+  const r = await api('/api/tracks'); if (!r) return; LIB = r; LIB.loaded = true;
+  const need = LIB.tracks.filter(t => !t.three_band).length, gb = x => (x / 1e9).toFixed(0);
+  $('#ltitle').textContent = LIB.name || 'Library';
+  $('#lstats').textContent = LIB.tracks.length ? `${LIB.tracks.length} tracks · ${LIB.tracks.length - need} with 3-band · ${LIB.versions.length} stems files` + (LIB.stems_mb ? ` · stems +${LIB.stems_mb} MB` : '') + (LIB.disk ? ` · ${gb(LIB.disk.free)} GB free` : '') : '';
+  $('#callout').hidden = !need; $('#ctitle').textContent = `${need} track${need === 1 ? '' : 's'} can get 3-band waveforms.`;
+  render();
+}
+function rows() {
+  const q = $('#search').value.toLowerCase();
+  let r = LIB.tracks;
+  if (FILTER === 'need3') r = r.filter(t => !t.three_band);
+  if (q) r = r.filter(t => (t.title + ' ' + t.artist).toLowerCase().includes(q));
+  return r;
+}
+const tstat = t => t.three_band ? '<span class="tag ok"><i></i>Ready</span>' : t.has_2ex ? '<span class="tag rb"><i></i>In rekordbox</span>' : '<span class="tag no"><i></i>Missing</span>';
+const sstat = t => t.has_stems ? '<span class="tag ok"><i></i>Ready</span>' : '<span class="tag no"><i></i>—</span>';
+function render() {
+  if (!ST.stick_ok) { $('#list').innerHTML = `<div class="empty">No library folder yet.<br><br><button class="btn primary" id="gosettings">Choose library folder</button></div>`; $('#gosettings').onclick = () => showTab('settings'); selc(); return; }
+  if (FILTER === 'vers') {
+    $('#list').innerHTML = LIB.versions.length ? LIB.versions.map(v => `<div class="tr" style="grid-template-columns:minmax(0,2fr) 90px minmax(0,2fr)"><span class="t">${esc(v.path.split('/').pop())}</span>
+      <span class="dim">stems</span><span class="t dim">${v.names.versions.map(esc).join(', ')}</span></div>`).join('')
+      : '<div class="empty">No stems files yet. Select tracks, then choose Make stems.</div>';
+    return;
+  }
+  const r = rows();
+  const head = `<div class="tr h"><span><input type="checkbox" id="all" aria-label="Select all"></span><span>Title</span><span>Artist</span><span>BPM</span><span>Time</span><span>3-Band</span><span>Stems</span></div>`;
+  $('#list').innerHTML = head + (r.length ? r.map(t => `<div class="tr ${CUR === t.dir ? 'sel' : ''}" data-d="${esc(t.dir)}">
+    <span><input type="checkbox" data-c="${esc(t.dir)}" ${SEL.has(t.dir) ? 'checked' : ''}></span>
+    <span class="t">${esc(t.title)}${t.exists ? '' : ' <span class="tag no"><i></i>audio missing</span>'}</span><span class="t dim">${esc(t.artist)}</span>
+    <span class="num">${t.bpm ? t.bpm.toFixed(1) : ''}</span><span class="num">${fmtT(t.duration)}</span><span>${tstat(t)}</span><span>${sstat(t)}</span></div>`).join('') : '<div class="empty">No tracks match.</div>');
+  $('#all').onchange = e => { r.forEach(t => e.target.checked ? SEL.add(t.dir) : SEL.delete(t.dir)); render(); };
+  selc();
+}
+const selc = () => $('#selc').textContent = SEL.size ? `${SEL.size} selected` : 'Nothing selected';
+$('#list').onclick = e => {
+  const c = e.target.closest('[data-c]');
+  if (c) { c.checked ? SEL.add(c.dataset.c) : SEL.delete(c.dataset.c); selc(); return; }
+  const tr = e.target.closest('.tr[data-d]'); if (tr) pick(tr.dataset.d);
+};
+$$('#filters button').forEach(b => b.onclick = () => { FILTER = b.dataset.f; segSet('filters', FILTER); render(); });
+$('#search').oninput = render;
+const track = d => LIB.tracks.find(t => t.dir === d);
+const chosen = () => SEL.size ? [...SEL] : (CUR ? [CUR] : []);
+
+function pick(d) {
+  CUR = d; render();
+  const t = track(d); if (!t) return;
+  $('#itit').textContent = t.title;
+  $('#imeta').innerHTML = [t.artist, t.bpm && t.bpm.toFixed(1) + ' BPM', fmtT(t.duration), t.three_band ? '3-band ready' : t.has_2ex ? '3-band in rekordbox' : 'no 3-band yet']
+    .filter(Boolean).map(x => `<span>${esc(x)}</span>`).join('');
+  ['rgb', '3band', 'blue'].forEach(s => $('#w-' + s).src = `/api/wave?dir=${encodeURIComponent(d)}&style=${s}&tint=stock`);
+  $('#w-custom').src = `/api/wave?dir=${encodeURIComponent(d)}&style=custom&custom=${encodeURIComponent(MOD.custom || '#6ba3f0')}`;
+  const showx7s = false;   // sidecar -> key/stem VERSION file retired 2026-10-19 (stems = STEMS-4 only)
+  $('#x7srow').hidden = !showx7s;
+  $('#x7krow').hidden = !(t.exists && t.duration);
+  $('#x7klive').value = 0; $('#x7klivev').textContent = '+0';
+  const a = $('#audio'); a.pause(); a.src = '/api/audio?path=' + encodeURIComponent(t.audio);
+  $('#play').disabled = !t.exists; icon(false); $('#ph').style.display = 'none'; $('#ptime').textContent = fmtT(t.duration) || '0:00';
+}
+const icon = p => $('#pic').innerHTML = p ? '<rect x="6" y="4" width="4.5" height="16" rx="1"/><rect x="13.5" y="4" width="4.5" height="16" rx="1"/>' : '<path d="M7 4l13 8-13 8z"/>';
+let X7LT = null;
+function x7kLiveLabel(v) { return (v > 0 ? '+' : '') + (+v).toFixed(2).replace(/\.?0+$/, '') || '+0'; }
+$('#x7klive').oninput = e => {
+  const v = +e.target.value;
+  $('#x7klivev').textContent = x7kLiveLabel(v);
+  clearTimeout(X7LT);
+  X7LT = setTimeout(() => {
+    const a = $('#audio'), d = CUR; if (!d) return;
+    const frac = a.duration ? a.currentTime / a.duration : 0, was = !a.paused;
+    a.src = v ? `/api/x7k_live?dir=${encodeURIComponent(d)}&semis=${v}` : '/api/audio?path=' + encodeURIComponent(track(d).audio);
+    a.onloadedmetadata = () => { a.currentTime = frac * (a.duration || 0); if (was) a.play().catch(() => {}); };
+    toast(v ? `Rendering live shift ${x7kLiveLabel(v)}… (first hit takes a few seconds)` : 'Back to file playback');
+  }, 500);
+};
+$('#play').onclick = () => { const a = $('#audio'); a.paused ? a.play().catch(() => toast('This file type can’t be played here.', true)) : a.pause(); };
+$('#audio').onplay = () => icon(true); $('#audio').onpause = () => icon(false);
+$('#audio').ontimeupdate = () => {
+  const a = $('#audio'); if (!a.duration) return;
+  $('#ptime').textContent = `${fmtT(a.currentTime) || '0:00'} / ${fmtT(a.duration)}`;
+  const bx = $('#wfs').getBoundingClientRect(), img = $('#w-rgb').getBoundingClientRect(), last = $('#w-custom').getBoundingClientRect(), ph = $('#ph');
+  ph.style.display = 'block'; ph.style.left = (img.left - bx.left + img.width * a.currentTime / a.duration) + 'px';
+  ph.style.top = (img.top - bx.top) + 'px'; ph.style.height = (last.bottom - img.top) + 'px';
+};
+$('#wfs').onclick = e => { const img = e.target.closest('img'), a = $('#audio'); if (!img || !a.duration) return;
+  const r = img.getBoundingClientRect(); a.currentTime = a.duration * (e.clientX - r.left) / r.width; };
+
+const do3 = dirs => { if (!dirs.length) return toast('Pick a track first.'); api('/api/3band', {dirs}).then(r => r && watch()); };
+$('#fixall').onclick = () => api('/api/3band', {}).then(r => r && watch());
+$('#b3').onclick = () => do3(chosen()); $('#i3').onclick = () => do3(CUR ? [CUR] : []);
+
+/* build dialog: stems (Demucs); key shift is real-time on the deck now */
+async function kdlg(dirs) {
+  dirs = dirs.filter(x => track(x)?.exists); if (!dirs.length) return toast('Pick a track first.');
+  if (!ST.demucs) return toast('Stems need Demucs. See Settings.', true);
+  const mins = dirs.reduce((s, d) => s + ((track(d)?.duration) || 0), 0) / 60;
+  const extra = `<div class="row"><label class="small dim" for="dxq">Stems file</label><select id="dxq">
+      <option value="opus">Opus — small (~3.5 MB/min)</option><option value="mp3">MP3 — compatible (~4.8 MB/min)</option><option value="flac">FLAC — lossless (~24 MB/min)</option></select></div>
+      <div class="est" id="dxest"></div>`;
+  const est = () => { const q = document.querySelector('#dxq')?.value || 'opus'; const rate = {opus: 3.5, mp3: 4.8, flac: 24}[q] || 3.5;
+      const mins2 = mins; const t = 0.8 + mins2 * 0.45;   // demucs + build + encode
+      return `≈ <b>${(mins2 * rate).toFixed(1)} MB</b> stems file for ${mins2.toFixed(1)} min of audio · takes about <b>${t < 1 ? '1 min' : Math.round(t) + ' min'}</b>${dirs.length > 1 ? ` (${dirs.length} tracks: scales up)` : ''}`; };
+  const okp = ask('Stems · ' + `${dirs.length} track${dirs.length > 1 ? 's' : ''}`,
+    'Vocals, drums, bass and other in one file. Mute them live from PERFORM › STEMS on the deck.', 'Build', extra);
+  const upd = () => { const el = document.querySelector('#dxest'); if (el) el.innerHTML = est(); };
+  upd();
+  const ok = await okp;
+  if (!ok) return;
+  const qel = document.querySelector('#dxq');
+  const quality = qel ? qel.value : 'opus';
+  dirs.forEach(d => api('/api/stems', {audio: track(d).audio, quality}).then(r => r && watch()));
+}
+$('#bstems').onclick = () => kdlg(chosen()); $('#istems').onclick = () => kdlg(CUR ? [CUR] : []);
+$('#ix7s').onclick = async () => {
+  const t = track(CUR); if (!t) return toast('Pick a track first.');
+  if (!t.has_sidecar || t.has_stems) return;
+  const ok = await ask('Deck stems file', 'Decode the small opus sidecar into the deck-playable stems file (vocals, drums, bass and other, sample-aligned to the mix). A couple of minutes.', 'Build');
+  if (!ok) return;
+  api('/api/x7s', {audio: t.audio}).then(r => r && watch());
+};
+
+/* ---- Settings */
+function fillSettings() {
+  if (!$('#stick').value) $('#stick').value = ST.stick || '';
+  if (!$('#project').value) $('#project').value = ST.project || '';
+}
+async function setStick(p) {
+  const r = await api('/api/stick', {path: p}); if (!r) return;
+  $('#stickmsg').textContent = r.ok ? 'Library set.' : 'That folder does not exist.';
+  await state(); SEL.clear(); CUR = null; LIB.loaded = false;
+}
+$('#stickpick').onclick = async () => { const p = await pickFolder('Choose your USB stick or rekordbox export'); if (p) { $('#stick').value = p; setStick(p); } };
+$('#stickbtn').onclick = () => setStick($('#stick').value);
+async function setProject(p) {
+  const r = await api('/api/project', {path: p}); if (!r) return;
+  $('#projmsg').textContent = !r.ok ? 'That folder has no tools folder in it.' : r.restart ? 'Saved. Quit and reopen Studio to use it.' : 'Already in use.';
+}
+$('#projpick').onclick = async () => { const p = await pickFolder('Choose the project folder'); if (p) { $('#project').value = p; setProject(p); } };
+$('#projbtn').onclick = () => setProject($('#project').value);
+
+
+/* ---- Activity: friendly build cards with progress + ETA */
+function jobCard(j) {
+  const el = Math.max(0, Date.now() / 1000 - j.t0);
+  let bar = '', note = j.note || '', meta = `${Math.floor(el / 60)}:${String(Math.floor(el % 60)).padStart(2, '0')} so far`;
+  if (j.state === 'running') {
+    // time left comes from the server (studio/app.py eta_left: recent
+    // rate, grows if a step stalls); null = not enough data yet
+    if (j.frac != null && (j.frac > 0 || j.left != null)) {
+      bar = `<div class="pb"><i style="width:${Math.round(j.frac * 100)}%"></i></div>`;
+      meta += ` · ${Math.round(j.frac * 100)}%`;
+      if (j.wait) meta += ' · waiting for you';
+      else if (j.left != null) meta += ` · ${fmtEta(j.left)} left`;
+      else meta += ' · estimating…';
+    } else if (j.wait) {
+      bar = `<div class="pb ind"><i></i></div>`;
+      meta += ' · waiting for you';
+    } else {
+      bar = `<div class="pb ind"><i></i></div>`;
+      meta += ' · estimating…';
+    }
+  } else if (j.state === 'done') {
+    bar = `<div class="pb"><i style="width:100%"></i></div>`;
+    note = note || 'Finished';
+    meta = `took ${Math.floor(el / 60)} min ${Math.floor(el % 60)} s`;
+  }
+  const log = (j.log || []).slice(-14).join('\n');
+  return `<div class="job"><div class="t"><b>${esc(j.title)}</b><span class="s ${j.state}">${j.state}</span></div>
+    ${note ? `<div class="note">${esc(note)}</div>` : ''}${bar}<div class="meta">${meta}</div>
+    ${log ? `<details><summary>Details</summary><pre>${esc(log)}</pre></details>` : ''}</div>`;
+}
+let polling = false;
+function watch() { $('#act').classList.add('on'); if (!polling) poll(); }
+async function poll() {
+  polling = true;
+  const js = await api('/api/jobs') || [];
+  $('#jobs').innerHTML = js.length ? js.slice(0, 8).map(jobCard).join('') : '<div class="empty">Nothing has run yet.</div>';
+  const inst = js.find(j => j.title.startsWith('Install mods'));
+  $('#dprog').innerHTML = inst ? jobCard(inst) : '';
+  const running = js.some(j => j.state === 'running');
+  $('#actdot').hidden = !running; $('#actdot').className = 'dot run';
+  if (running) setTimeout(poll, 1000); else { polling = false; if (LIB.loaded) load(); }
+}
+
+segSet('wstyle', MOD.wave); segSet('wstyle2', PICK.wave); segSet('pscreen', pscreen); segSet('filters', FILTER);
+state().then(() => { swatches(); usePreset(); renderPick(); }); setInterval(state, 6000); poll();
+async function upCheck(force) {
+  $('#upline').textContent = 'Checking…';
+  const u = await api('/api/update' + (force ? '?force=1' : ''));
+  if (!u) return;
+  $('#upcur').textContent = u.current;
+  const dot = $('#updot');
+  $('#upnotes').hidden = true; $('#upget').hidden = true; $('#updpill').hidden = true;
+  if (u.error) { dot.className = 'dot'; $('#upline').textContent = `Couldn't check (${u.error.replace("couldn't reach GitHub ", '')}). Are you online?`; return; }
+  if (u.newer) {
+    dot.className = 'dot warn';
+    $('#upline').textContent = `Version ${u.latest} is out` + (u.asset ? ` (${Math.round(u.asset.size / 1e6)} MB).` : '. Get it from the release page.');
+    if (u.notes) { $('#upnotes').textContent = u.notes; $('#upnotes').hidden = false; }
+    $('#upget').hidden = !u.asset; $('#updpill').hidden = false;
+  } else { dot.className = 'dot ok'; $('#upline').textContent = `You're up to date (latest is ${u.latest}).`; }
+}
+$('#upcheck').onclick = () => upCheck(true);
+$('#uppage').onclick = () => api('/api/update/page', {});
+$('#updpill').onclick = () => showTab('settings');
+$('#upget').onclick = async () => { const r = await api('/api/update/download', {}); if (r) { toast('Downloading the update…'); $('#act').classList.add('on'); } };
+upCheck(false); setInterval(() => upCheck(false), 3600 * 1000);
+</script>
+</body>
+</html>

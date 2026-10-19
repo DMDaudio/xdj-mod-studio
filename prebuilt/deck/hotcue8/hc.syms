@@ -1,0 +1,9 @@
+09790d04 B _hc_count
+09790d00 B _hc_draws
+0979000c T _hc_entry
+09790cfc b _hc_hash
+097902e8 T _hc_hook
+097901c4 T _hc_next
+09790cf8 D _hc_prev
+09790250 T _hc_prev_page
+09790000 t _hc_table

@@ -1,0 +1,25 @@
+# Python / OS
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# build outputs and local caches
+dist/
+build/
+work/
+cache/
+screenshots/
+emu/_fastcore.so
+emu/c6x/_c6xcore.so
+emu/_buildinfo.py
+
+# Pioneer DJ firmware and anything made from it: never commit these.
+# The app builds them on your Mac from your own official update file.
+*.UPD
+*.img
+*.pkl
+*.pkl.gz
+*.npz
+*.npy
+studio/assets/screens.npz
