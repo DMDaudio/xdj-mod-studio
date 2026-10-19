@@ -175,6 +175,18 @@ kbd { font: 11px var(--mono); background: var(--raise2); border: 1px solid var(-
 .est b { color: var(--text); font-weight: 600; }
 
 #p-settings { padding: 16px; justify-content: center; }
+.cable { display: grid; grid-template-columns: 56px 1fr auto; gap: 16px; align-items: center; padding: 18px 20px; border-radius: 12px; border: 2px solid var(--amber); background: color-mix(in srgb, var(--amber) 10%, transparent); margin-bottom: 14px; }
+.cable svg { width: 52px; height: 52px; color: var(--amber); }
+.cable .cbig { font-size: 22px; font-weight: 700; line-height: 1.2; color: var(--text); }
+.cable .csub { margin-top: 6px; font-size: 13px; color: var(--dim); line-height: 1.5; }
+.cable .cstate { display: flex; gap: 8px; align-items: center; font-size: 13px; font-weight: 600; white-space: nowrap; }
+.cable.on { border-color: var(--green); background: color-mix(in srgb, var(--green) 10%, transparent); }
+.cable.on svg { color: var(--green); }
+@media (max-width: 640px) { .cable { grid-template-columns: 1fr; } }
+.panel .cable { grid-template-columns: 40px 1fr; gap: 12px; padding: 14px 16px; }
+.panel .cable svg { width: 38px; height: 38px; }
+.panel .cable .cbig { font-size: 19px; }
+.panel .cable .cstate { grid-column: 2; }
 .settings { width: min(680px, 100%); display: flex; flex-direction: column; gap: 14px; overflow: auto; margin: 0 auto; padding: 22px 16px 40px; box-sizing: border-box; max-height: 100%; }
 .bake { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .bake ul { margin: 6px 0 0 16px; padding: 0; line-height: 1.55; font-size: 13px; color: var(--dim); }
@@ -249,6 +261,12 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div><h1 id="hhead">Checking your setup…</h1><p id="hsub"></p>
         <div class="row"><button class="btn primary" id="hgo">Open Mod Builder</button><button class="btn" id="hemu">Try the emulator</button></div></div>
     </div>
+    <div class="cable" data-cable>
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 14h14v10H8zM22 19h8c6 0 8 4 8 9v8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="33" y="34" width="10" height="8" rx="1.5" fill="currentColor"/></svg>
+      <div><div class="cbig">Connect the deck with a USB cable</div>
+      <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
+      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+    </div>
     <div class="panel checks" id="modlist"></div>
     <div class="panel checks" id="checks"></div>
   </div>
@@ -257,6 +275,12 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
 <section class="page" id="p-mods" role="tabpanel">
   <div class="mods-body">
     <div class="panel pad scroll">
+      <div class="cable" data-cable>
+      <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 14h14v10H8zM22 19h8c6 0 8 4 8 9v8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="33" y="34" width="10" height="8" rx="1.5" fill="currentColor"/></svg>
+      <div><div class="cbig">Connect the deck with a USB cable</div>
+      <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
+      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+    </div>
       <h2>Pick your mods</h2>
       <div class="pick" id="pk-theme">
         <input type="checkbox" id="pk-theme-on" checked disabled>
@@ -598,6 +622,10 @@ async function state() {
   const s = await api('/api/state'); if (!s) return; ST = s;
   if (s.upd && !$('#updpath').value) { $('#updpath').value = s.upd; updReady(); }
   $('#deckdot').className = 'dot ' + (s.deck ? 'ok' : ''); $('#decktxt').textContent = s.deck ? 'Deck connected' : 'No deck';
+  $$('[data-cable]').forEach(el => { el.classList.toggle('on', !!s.deck);
+    el.querySelector('.cstate .dot').className = 'dot ' + (s.deck ? 'ok' : 'warn');
+    el.querySelector('.ctxt').textContent = s.deck ? 'Deck connected' : 'Not connected yet';
+    el.querySelector('.cbig').textContent = s.deck ? 'Deck connected over USB' : 'Connect the deck with a USB cable'; });
   $('#deckdot2').className = 'dot ' + (s.deck ? 'ok' : ''); $('#deckline').textContent = s.deck ? 'XDJ-700 connected' : 'Not connected';
   const hint = $('#deckhint');
   hint.hidden = s.deck || !s.deck_err; hint.textContent = s.deck_err || '';
