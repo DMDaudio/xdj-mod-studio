@@ -95,7 +95,8 @@ def _inproc(args):
 
 def run(args, show=("RESULT", "FAIL", "REFUSED", "pacing", "Timeout",
                     "ZERO", "nonzero", "complete", "left", "track length",
-                    "32-bit", "reusing")):
+                    "32-bit", "reusing", "fastload:", "short", "Error",
+                    "rror:", "aborting")):
     if os.environ.get("XDJ_SHARE_SESSION") == "1":
         out, opens = _inproc(args)
     else:
@@ -203,7 +204,14 @@ def main():
         # remembered on this deck: ONE spot-check session; else 64 KB/session
         for grp in ([ranges] if seen else [[r] for r in ranges]):
             out = run(["tools/deck_zero_survey.py"] + grp)
+            if out.count("ALL ZERO") < len(grp) and "nonzero" not in out:
+                # no answer (not data): the USB link hiccuped -- try once more
+                print("    no clean answer from the deck - retrying that check once", flush=True)
+                out = run(["tools/deck_zero_survey.py"] + grp)
             if out.count("ALL ZERO") < len(grp):
+                tail = [l for l in out.strip().splitlines() if l.strip()][-3:]
+                for l in tail:
+                    print("    (deck said) " + l.strip()[:160], flush=True)
                 sys.exit("STOP: safety check failed (memory not empty, or the USB "
                          "link dropped) - nothing installed." + POWER)
     print(f"2/5 waveform overview ({a.mode}) + snapshot routine")
@@ -218,7 +226,14 @@ def main():
     out = run(["tools/deck_zero_survey.py",
                f"{VR.VCAVE:x}:{MSET.MSEND - VR.VCAVE:x}",
                f"{PP.PC0:x}:{PP.PEND - PP.PC0:x}"])
+    if ("ALL ZERO" not in out or out.count("ALL ZERO") < 2) and "nonzero" not in out.lower():
+        print("    no clean answer from the deck - retrying that check once", flush=True)
+        out = run(["tools/deck_zero_survey.py",
+                   f"{VR.VCAVE:x}:{MSET.MSEND - VR.VCAVE:x}",
+                   f"{PP.PC0:x}:{PP.PEND - PP.PC0:x}"])
     if "ALL ZERO" not in out or "nonzero" in out.lower():
+        for l in [l for l in out.strip().splitlines() if l.strip()][-3:]:
+            print("    (deck said) " + l.strip()[:160], flush=True)
         sys.exit("STOP: safety check of the mod area failed (memory not "
                  "empty, or the USB link dropped) - nothing more installed." + POWER)
     print("4/5 EJECT THE USB STICK from the deck now (no track loaded).")

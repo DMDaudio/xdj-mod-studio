@@ -63,18 +63,39 @@ _LW_SESSION = None  # (handle, open time) whose LW self-test passed
 LR_OK = None        # 32-bit reads: None = untested this session, True/False
 
 
-def _lr_round(h, addr, n):
-    """n (<=32) u32 values from addr (4-aligned) via the shell's LR."""
-    h.write(_q(f"{addr:x},{n - 1:x}LR".encode()))
-    raw = bytearray()
-    end = time.time() + 9.0
+def _flush(h):
+    """Drop anything left over from an earlier reply (slow USB stacks, e.g.
+    Windows, can deliver the tail of one reply after the next request)."""
+    for _ in range(50):
+        if not h.read(64, timeout=5):
+            return
+
+
+def _done(raw, count, n, quiet=0.0):
+    """n values seen AND the reply has ended: a CR/LF after them, or no new
+    bytes for 150 ms (in case a reply type has no line end)."""
+    return count >= n and (b"\n" in raw or b"\r" in raw or quiet > 0.15)
+
+
+def _lr_round(h, addr, n, tries=3):
+    """n (<=32) u32 values from addr (4-aligned) via the shell's LR.
+    Retries a short/garbled reply (tries in all) before giving up."""
     pat = re.compile(rb"\b([0-9A-Fa-f]{8})\b")
-    while time.time() < end and len(pat.findall(raw)) < n:
-        chunk = h.read(64, timeout=20)
-        if chunk:
-            raw.extend(chunk)
-    vals = [int(t, 16) for t in pat.findall(raw)]
-    return vals[-n:] if len(vals) >= n else None
+    for _ in range(tries):
+        _flush(h)
+        h.write(_q(f"{addr:x},{n - 1:x}LR".encode()))
+        raw = bytearray()
+        end = time.time() + 9.0
+        last = time.time()
+        while time.time() < end and not _done(raw, len(pat.findall(raw)), n, time.time() - last):
+            chunk = h.read(64, timeout=20)
+            if chunk:
+                raw.extend(chunk)
+                last = time.time()
+        vals = [int(t, 16) for t in pat.findall(raw)]
+        if len(vals) >= n:
+            return vals[-n:]
+    return None
 
 
 def _lr_usable(h, base):
@@ -123,15 +144,21 @@ def _br_only(h, base, size):
     while off < size:
         n = min(READ_CHUNK, size - off)
         q = f"{base + off:x},{n - 1:x}BR\r\x00".encode()
-        h.write(_q(q))
-        raw = bytearray()
-        end = time.time() + 9.0
-        # each value is 'XX ' = 3 chars; harvest when enough arrive
-        while time.time() < end and len(_parse_values(raw)) < n:
-            chunk = h.read(64, timeout=20)
-            if chunk:
-                raw.extend(chunk)
-        vals = _parse_values(raw)
+        for _ in range(3):                 # retry a short/garbled reply
+            _flush(h)
+            h.write(_q(q))
+            raw = bytearray()
+            end = time.time() + 9.0
+            last = time.time()
+            # each value is 'XX ' = 3 chars; harvest when the line is complete
+            while time.time() < end and not _done(raw, len(_parse_values(raw)), n, time.time() - last):
+                chunk = h.read(64, timeout=20)
+                if chunk:
+                    raw.extend(chunk)
+                last = time.time()
+            vals = _parse_values(raw)
+            if len(vals) >= n:
+                break
         if len(vals) < n:
             sys.exit(f"fastload: short BR at {base + off:#x} "
                      f"({len(vals)}/{n}) - aborting")
