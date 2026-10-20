@@ -66,8 +66,13 @@ PSW = PST + 48                      # swipe: u16 down-x, +2 pending code,
 PADART = PC0 + 0x1A10               # stock hot-cue pad: 63 rows x 22 u16
 FONTP = PC0 + 0x2510                # pad font (14-px caps, digits < > + -)
 FONTT = PC0 + 0x2C50                # tab font (condensed 9-px caps, << >>)
-FONTK = PC0 + 0x3610                # key-name font (condensed bold 13-px)
-PEND = PC0 + 0x41D0
+FONTK = PC0 + 0x3760                # key-name font (condensed bold 13-px)
+# room for Windows fonts too: there Arial stands in for Helvetica Neue and
+# the tab/key tables come out ~310 B bigger each (2802 / 3325 B vs 2433 /
+# 2920 on a Mac) -- 2026-10-20 a Windows install hit FONTT's old limit
+PEND = PC0 + 0x44A0
+ZERO_END = 0x081E03EB               # the image zero run holding the cave
+assert PEND <= ZERO_END, hex(PEND)
 HCPAGE = PMASK + 2                  # u8 hot cue page (tools/hotcue8 writes)
 HC_BASE = int(os.environ.get("HC_BASE", "0x09790000"), 0)
 HC_NEXTP = HC_BASE + 4              # hotcue8 entry table: +4 = hc_next
