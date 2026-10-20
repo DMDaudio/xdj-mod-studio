@@ -1,4 +1,4 @@
-# XDJ-700 Mods
+# XDJ Mod Studio: XDJ-700 Mods
 
 Open-source mods for the **XDJ-700** (firmware 1.15): RGB and 3-band
 waveforms, live key shift, stems, beat jump pads, live colour themes and
