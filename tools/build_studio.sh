@@ -6,6 +6,12 @@
 # (bundled for the deck USB shell) and Xcode CLT (codesign).
 set -e
 cd "$(dirname "$0")/.."
+# never bake the build folder into the app (it carries the builder's user
+# name): emu/_buildinfo.py is only for the old emulator app (build_app.sh)
+if [ -f emu/_buildinfo.py ]; then
+  mv emu/_buildinfo.py build/_buildinfo.py.hold
+  trap 'mv build/_buildinfo.py.hold emu/_buildinfo.py 2>/dev/null || true' EXIT
+fi
 printf 'import os\nos.environ.setdefault("XDJ_REPO_BAKED", "%s")\n' "$(pwd)" \
   > build/studio-app-hook.py
 mkdir -p build/studio-app
@@ -154,6 +160,10 @@ cp tools/Studio-Info.plist "$APPDIR/Contents/Info.plist"
 if [ -f emu/icon.icns ]; then cp emu/icon.icns "$APPDIR/Contents/Resources/AppIcon.icns"; fi
 # pip install records hold the build Mac's folder path: not needed at runtime
 find "$APPDIR" -name direct_url.json -path "*dist-info*" -delete 2>/dev/null || true
+# build paths (the builder's home folder) out of every file, then refuse if
+# the user name is still anywhere (compressed modules included)
+find "$APPDIR" -name "_buildinfo.py*" -delete 2>/dev/null || true
+.venv/bin/python tools/scrub_app.py "$APPDIR"
 codesign --force --deep -s - "$APPDIR"
 FINAL="dist/XDJ Mod Studio.app"
 [ "$PUBLIC" = 1 ] && { mkdir -p dist/public; FINAL="dist/public/XDJ Mod Studio.app"; }
