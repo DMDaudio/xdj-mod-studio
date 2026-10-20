@@ -184,6 +184,12 @@ kbd { font: 11px var(--mono); background: var(--raise2); border: 1px solid var(-
 .cable.on svg { color: var(--green); }
 .cable .ctips { grid-column: 1 / -1; margin: 4px 0 0 18px; padding: 0; font-size: 13px; line-height: 1.6; color: var(--text); }
 .cable.on .ctips { display: none; }
+.cable .creinst { margin-left: 8px; }
+.howto { padding: 16px 20px; }
+.howto h2 { margin: 0 0 10px; }
+.hsteps { margin: 0 0 10px 20px; padding: 0; display: grid; gap: 8px; }
+.hsteps li b { display: block; font-size: 15px; }
+.hsteps li span { font-size: 13px; color: var(--dim); }
 @media (max-width: 640px) { .cable { grid-template-columns: 1fr; } }
 .panel .cable { grid-template-columns: 40px 1fr; gap: 12px; padding: 14px 16px; }
 .panel .cable svg { width: 38px; height: 38px; }
@@ -267,7 +273,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 14h14v10H8zM22 19h8c6 0 8 4 8 9v8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="33" y="34" width="10" height="8" rx="1.5" fill="currentColor"/></svg>
       <div><div class="cbig">Connect the deck with a USB cable</div>
       <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
-      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span><button class="btn sm primary creinst" hidden>Reinstall my mods</button></div>
       <ol class="ctips">
         <li>Use the square <b>USB-B port on the back</b> of the XDJ-700, not the stick slot on the front.</li>
         <li>Use a <b>data</b> cable (some only charge), plugged straight into the computer: no hub or dock.</li>
@@ -275,6 +281,15 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
         <li>Quit rekordbox, Serato and any other DJ or MIDI app: they can grab the deck first.</li>
         <li>Still nothing? Unplug, wait 10 seconds, plug back in.</li>
       </ol>
+    </div>
+    <div class="panel howto">
+      <h2>How it works</h2>
+      <ol class="hsteps">
+        <li><b>Connect the deck with a USB cable</b><span>The USB-B port on the back of the XDJ-700, straight into this computer. Switch the deck on.</span></li>
+        <li><b>Install your mods</b><span>Mods tab › Install. Keep the USB stick out of the deck until the app asks for it. About 15–30 minutes the first time.</span></li>
+        <li><b>Play with your normal stick</b><span>Put your usual rekordbox stick back in. Nothing special or freshly formatted is needed.</span></li>
+      </ol>
+      <div class="small dim">Switching the deck off puts it back to stock, so reinstall after each power-up (the app offers it when you plug the deck in). <b>Stems:</b> Track Builder saves <code>Title (STEMS).wav</code> next to the original track on your stick; on the deck it's under BROWSE › FOLDER, and PERFORM › STEMS mutes the parts.</div>
     </div>
     <div class="panel checks" id="modlist"></div>
     <div class="panel checks" id="checks"></div>
@@ -288,7 +303,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <svg viewBox="0 0 48 48" aria-hidden="true"><path d="M8 14h14v10H8zM22 19h8c6 0 8 4 8 9v8" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><rect x="33" y="34" width="10" height="8" rx="1.5" fill="currentColor"/></svg>
       <div><div class="cbig">Connect the deck with a USB cable</div>
       <div class="csub">Mods go straight into the XDJ-700 over the cable, not onto a USB stick. Plug the <b>USB port on the back of the deck</b> into this computer (no hub), switch the deck on, and quit rekordbox or other DJ apps. Your USB stick is only for music, as usual.</div></div>
-      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span></div>
+      <div class="cstate"><span class="dot"></span><span class="ctxt">Not connected</span><button class="btn sm primary creinst" hidden>Reinstall my mods</button></div>
       <ol class="ctips">
         <li>Use the square <b>USB-B port on the back</b> of the XDJ-700, not the stick slot on the front.</li>
         <li>Use a <b>data</b> cable (some only charge), plugged straight into the computer: no hub or dock.</li>
@@ -411,6 +426,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
     <div class="list" id="list"></div>
     <div class="selbar">
       <span class="dim" id="selc">Nothing selected</span><span class="grow"></span>
+      <span class="small faint" style="margin-right:10px">Stems files are saved next to the original track as <code>Title (STEMS)</code>. On the deck: BROWSE › FOLDER.</span>
       <button class="btn" id="b3">Add 3-band</button><button class="btn primary" id="bstems">Make stems</button>
     </div>
   </div>
@@ -641,7 +657,11 @@ async function state() {
   $$('[data-cable]').forEach(el => { el.classList.toggle('on', !!s.deck);
     el.querySelector('.cstate .dot').className = 'dot ' + (s.deck ? 'ok' : 'warn');
     el.querySelector('.ctxt').textContent = s.deck ? 'Deck connected' : 'Not connected yet';
-    el.querySelector('.cbig').textContent = s.deck ? 'Deck connected over USB' : 'Connect the deck with a USB cable'; });
+    el.querySelector('.cbig').textContent = s.deck ? 'Deck connected over USB' : 'Connect the deck with a USB cable';
+    el.querySelector('.creinst').hidden = !(s.deck && savedMods()); });
+  if (s.deck && !DECKWAS && savedMods() && !OFFERED) { OFFERED = true; offerReinstall(); }
+  if (!s.deck) OFFERED = false;
+  DECKWAS = !!s.deck;
   $('#deckdot2').className = 'dot ' + (s.deck ? 'ok' : ''); $('#deckline').textContent = s.deck ? 'XDJ-700 connected' : 'Not connected';
   const hint = $('#deckhint');
   hint.hidden = s.deck || !s.deck_err; hint.textContent = s.deck_err || '';
@@ -1154,6 +1174,30 @@ function jobCard(j) {
 }
 let polling = false;
 function watch() { $('#act').classList.add('on'); if (!polling) poll(); }
+// ---- reinstall on plug-in (the deck forgets its mods at every power-off)
+let DECKWAS = false, OFFERED = false;
+const savedMods = () => ST.mods && ST.mods.pads !== undefined ? ST.mods : null;
+function modsLabel(m) {
+  const p = [`waveform ${String(m.mode || 'rgb').toUpperCase()}`];
+  if (m.pads) p.push('PERFORM pads');
+  if (m.themes) p.push('theme switching');
+  if (m.liveks) p.push('live key shift');
+  if (m.phase) p.push('phase meter');
+  return p.join(' · ');
+}
+async function reinstall() {
+  const m = savedMods(); if (!m) return;
+  const js = await api('/api/jobs') || [];
+  if (js.some(j => j.state === 'running')) return toast('Something is already running: wait for it to finish.', true);
+  api('/api/deck/install', {mode: m.mode, pads: m.pads, themes: m.themes, liveks: m.liveks, phase: m.phase, brake: m.brake}).then(r => r && watch());
+}
+async function offerReinstall() {
+  const m = savedMods(); if (!m) return;
+  if (await ask('Deck connected: reinstall your mods?',
+    `Switching the deck off clears the mods, so after each power-up they need installing again. Same choices as last time: ${modsLabel(m)}. Keep the USB stick out of the deck until the app asks for it. If the mods are still on the deck, the app notices and does nothing.`, 'Reinstall'))
+    reinstall();
+}
+document.addEventListener('click', e => { if (e.target.closest('.creinst')) reinstall(); });
 async function poll() {
   polling = true;
   const js = await api('/api/jobs') || [];

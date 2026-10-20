@@ -86,7 +86,7 @@ UIHTML = os.path.join(BUNDLE, "studio", "ui.html") if FROZEN else os.path.join(H
 
 APP_SUPPORT = app_support_dir()
 # the app's own release number (GitHub release tag v<APP_VERSION>)
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 RELEASES_API = "https://api.github.com/repos/inter55/xdj-mod-studio/releases/latest"
 RELEASES_PAGE = "https://github.com/inter55/xdj-mod-studio/releases/latest"
 SETTINGS = os.path.join(APP_SUPPORT, "studio.json")
@@ -1191,7 +1191,9 @@ def j_deck_install(log, prog, mode, pads=True,
         raise RuntimeError("deck not connected (USB)")
     try:
         s = settings()
-        s["mods"] = {"mode": mode}
+        s["mods"] = {"mode": mode, "pads": bool(pads), "themes": bool(themes),
+                     "liveks": bool(liveks), "phase": bool(phase),
+                     "brake": float(brake or 0)}
         save_settings(s)
     except Exception:
         pass
@@ -1270,6 +1272,13 @@ def j_deck_install(log, prog, mode, pads=True,
 
     prog(0.0, "Starting", eta=sum(plan.values()) * SESSION_S)
     rc, out = run_tool(tlog, args)
+    if rc and "still in the deck's memory" in out:
+        # the deck kept this power-up's mods (cable re-plugged, no restart)
+        log("Your mods are already on the deck from earlier (it hasn't been "
+            "switched off since). Nothing to do. If they misbehave, switch the "
+            "deck off and on and install again.")
+        prog(1.0, "Already installed")
+        return
     if rc or "DONE" not in out:
         raise RuntimeError("deck session stopped -- see log")
     prog(1.0, "Finished")
