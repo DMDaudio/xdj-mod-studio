@@ -36,6 +36,7 @@ def _stock():
     from emu import fwhome
     return fwhome.path("pad_digits.npz")
 NEUE = "/System/Library/Fonts/HelveticaNeue.ttc"
+CONDENSE = 0.84      # Neue Condensed Bold width / Arial Bold width (measured)
 
 
 def _font_file(path, index):
@@ -89,7 +90,13 @@ def _cols(al):
 def _render(ch, font_path, index, box_h, box_w=None, cap_ref="H"):
     """Supersampled render of ch scaled so cap height == box_h."""
     S = 8
+    want = index
     font_path, index = _font_file(font_path, index)
+    # Helvetica Neue Condensed Bold (face 4) is narrow; the stand-in used
+    # where it doesn't exist (Arial Bold on Windows) is ~16% wider, which
+    # pushed "<< BEAT JUMP >>" past its 92-px tab (2026-10-21 report: the
+    # tab name vanished). Squeeze the stand-in to the Mac's widths.
+    squeeze = CONDENSE if (want == 4 and not os.path.exists(NEUE)) else 1.0
     f = ImageFont.truetype(font_path, 40 * S // 4, index=index)
     im = Image.new("L", (f.size * 3, f.size * 3), 0)
     ImageDraw.Draw(im).text((f.size, f.size * 2), cap_ref, font=f, fill=255,
@@ -104,7 +111,7 @@ def _render(ch, font_path, index, box_h, box_w=None, cap_ref="H"):
         return np.zeros((box_h, 3))
     a = a[:, xs[0]:xs[-1] + 1]
     scale = box_h / a.shape[0]
-    w = box_w or max(1, round(a.shape[1] * scale))
+    w = box_w or max(1, round(a.shape[1] * scale * squeeze))
     out = Image.fromarray(a.astype(np.uint8)).resize((w, box_h), Image.LANCZOS)
     return np.clip(np.array(out, float) / 255.0, 0, 1)
 
