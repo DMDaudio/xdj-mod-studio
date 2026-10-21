@@ -123,7 +123,7 @@ def main():
         if rd32(h, HOOK) != entry:
             lw(h, HOOK, live)
             sys.exit("FAIL: hook verify - restored; REBOOT before playing")
-        print("RESULT: PASS - PERFORM > tap HOT CUE again to page A-C / D-F / G-H")
+        print("RESULT: PASS - PERFORM > swipe left/right along the HOT CUE tab to page A-C / D-F / G-H")
         return 0
     finally:
         h.close()

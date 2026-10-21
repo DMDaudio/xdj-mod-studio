@@ -266,7 +266,7 @@ def main():
         if a.no_hotcues:
             print("5f  8 hot cue pages skipped (not selected)")
         else:
-            print("5f  8 hot cue pages (PERFORM > tap HOT CUE again)")
+            print("5f  8 hot cue pages (PERFORM > swipe along the HOT CUE tab)")
             r = until_pass(["tools/hotcue8_apply.py", "--precheck"], "hotcues")
             if r is not True:
                 sys.exit("STOP: hot cue pages install failed - power-cycle "
