@@ -35,6 +35,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 FROZEN = getattr(sys, "frozen", False)
 WINDOWS = sys.platform == "win32"
+if sys.platform == "darwin":
+    # Opened by double-click, macOS gives an app a bare PATH without Homebrew
+    # (where ffmpeg, rubberband and python3.12 live): add it ourselves, like a
+    # Terminal launch would (Reddit report 2026-10-21).
+    _p = [d for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    for _d in ("/opt/homebrew/bin", "/opt/homebrew/sbin", "/usr/local/bin"):
+        if os.path.isdir(_d) and _d not in _p:
+            _p.append(_d)
+    os.environ["PATH"] = os.pathsep.join(_p or ["/usr/bin", "/bin"])
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from emu.paths import app_support_dir  # noqa: E402  (stdlib-only module)
 if WINDOWS:
@@ -86,7 +95,7 @@ UIHTML = os.path.join(BUNDLE, "studio", "ui.html") if FROZEN else os.path.join(H
 
 APP_SUPPORT = app_support_dir()
 # the app's own release number (GitHub release tag v<APP_VERSION>)
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 RELEASES_API = "https://api.github.com/repos/inter55/xdj-mod-studio/releases/latest"
 RELEASES_PAGE = "https://github.com/inter55/xdj-mod-studio/releases/latest"
 SETTINGS = os.path.join(APP_SUPPORT, "studio.json")
@@ -431,6 +440,63 @@ def j_3band(log, prog, stick, dirs, compute_all):
 
 
 _DEMUCS = [0.0, False]
+
+
+def _find_torch_python():
+    """A Python PyTorch supports (3.11 / 3.12) for the Demucs environment."""
+    for name in ("python3.12", "python3.11"):
+        p = shutil.which(name)
+        if p:
+            return [p]
+    if WINDOWS and shutil.which("py"):
+        for v in ("-3.12", "-3.11"):
+            r = subprocess.run(["py", v, "-c", "print(1)"], capture_output=True)
+            if r.returncode == 0:
+                return ["py", v]
+    for p in ("/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12",
+              "/opt/homebrew/bin/python3.11", "/usr/local/bin/python3.11"):
+        if os.path.exists(p):
+            return [p]
+    return None
+
+
+def j_demucs_install(log, prog):
+    """Stem separation (Demucs + PyTorch, ~2-3 GB) into its own environment
+    ~/.xdj700-studio/venv, from inside the app (no Terminal, no source)."""
+    py = _find_torch_python()
+    if not py:
+        raise RuntimeError(
+            "Stem separation needs Python 3.11 or 3.12. Mac: install Homebrew "
+            "(brew.sh), then in Terminal: brew install python@3.12 ffmpeg -- "
+            "Windows: install Python 3.12 from python.org. Then press Install again.")
+    env = os.path.dirname(os.path.dirname(DEMUCS_PY))
+    os.makedirs(os.path.dirname(env), exist_ok=True)
+    log(f"creating the environment with {' '.join(py)}")
+    prog(0.02, "Creating the environment")
+    subprocess.run(py + ["-m", "venv", env], check=True)
+    steps = [(["-m", "pip", "install", "--upgrade", "pip"], 0.05, "Updating pip"),
+             (["-m", "pip", "install", "torch", "torchaudio", "demucs", "soundfile"],
+              0.9, "Downloading PyTorch + Demucs (2-3 GB, takes a while)")]
+    for args, frac, note in steps:
+        prog(frac - 0.04, note)
+        p = subprocess.Popen([DEMUCS_PY] + args, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True,
+                             encoding="utf-8", errors="replace")
+        for line in p.stdout:
+            line = line.rstrip()
+            if line:
+                log(line[-200:])
+        if p.wait():
+            raise RuntimeError("pip failed -- see the log (check the internet connection)")
+    r = subprocess.run([DEMUCS_PY, "-c", "import demucs; print('Demucs ready')"],
+                       capture_output=True, text=True)
+    if r.returncode:
+        raise RuntimeError("Demucs did not import: " + (r.stderr or "")[-300:])
+    _DEMUCS[:] = [0, False]                     # re-check on the next poll
+    if not shutil.which("ffmpeg"):
+        log("NOTE: ffmpeg is still missing; Make stems needs it "
+            "(Mac: brew install ffmpeg -- Windows: winget install ffmpeg).")
+    prog(1.0, "Stem separation ready")
 
 
 def demucs_ok():
@@ -1483,6 +1549,7 @@ class H(BaseHTTPRequestHandler):
                                   "project_ok": os.path.isdir(os.path.join(ROOT, "tools")),
                                   "deck": deck_present(), "deck_err": deck_err(),
                                   "demucs": demucs_ok(),
+                                  "ffmpeg": bool(shutil.which("ffmpeg")),
                                   "mods": s.get("mods", {}),
                                   "themes": themes,
                                   "themes_ok": bool(themes), "themes_err": _THEME_ERR[0],
@@ -1672,6 +1739,8 @@ class H(BaseHTTPRequestHandler):
             if p == "/api/update/page":
                 webbrowser.open(RELEASES_PAGE)
                 return self.send({"ok": True})
+            if p == "/api/demucs/install":
+                return self.send({"job": job("Install stem separation", j_demucs_install)})
             if p == "/api/firmware/setup":
                 return self.send({"job": job("Set up your firmware", j_firmware,
                                              os.path.expanduser(b["path"].strip()))})

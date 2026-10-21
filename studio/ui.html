@@ -578,7 +578,8 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
     <div class="panel stack" style="gap:8px">
       <h2>Stem separation</h2>
       <div class="row"><span class="dot" id="dmdot"></span><span class="dim" id="dmline"></span></div>
-      <div class="small faint">Install on Wi-Fi (about 2–3 GB, in its own environment): <code>bash studio/install_demucs.sh</code></div>
+      <div class="row"><span class="dot" id="ffdot"></span><span class="dim" id="ffline"></span></div>
+      <div class="row"><button class="btn primary" id="dminst">Install stem separation…</button><span class="small faint">About 2–3 GB, on Wi-Fi, in its own environment. Needs Python 3.11/3.12 and ffmpeg (Mac: <code>brew install python@3.12 ffmpeg</code>; Windows: Python 3.12 from python.org + <code>winget install ffmpeg</code>).</span></div>
     </div>
   </div>
 </section>
@@ -666,6 +667,8 @@ async function state() {
   const hint = $('#deckhint');
   hint.hidden = s.deck || !s.deck_err; hint.textContent = s.deck_err || '';
   $('#deckgo').disabled = !s.deck; $('#pk-theme-send').disabled = !s.deck;
+  $('#ffdot').className = 'dot ' + (s.ffmpeg ? 'ok' : 'warn'); $('#ffline').textContent = s.ffmpeg ? 'ffmpeg is installed.' : 'ffmpeg is missing. “Make stems” needs it (Mac: brew install ffmpeg; Windows: winget install ffmpeg).';
+  $('#dminst').hidden = !!s.demucs;
   $('#dmdot').className = 'dot ' + (s.demucs ? 'ok' : 'warn'); $('#dmline').textContent = s.demucs ? 'Demucs is installed.' : 'Demucs is not installed. “Make stems” needs it.';
   renderHome(); renderPick();
   $('#nothemes').hidden = s.themes_ok; $('#themeerr').textContent = s.themes_err || ''; $('#themeroot').textContent = s.project || '';
@@ -1174,6 +1177,10 @@ function jobCard(j) {
 }
 let polling = false;
 function watch() { $('#act').classList.add('on'); if (!polling) poll(); }
+$('#dminst').onclick = async () => {
+  if (await ask('Install stem separation?', 'Downloads PyTorch and Demucs (about 2–3 GB) into their own folder, so use Wi-Fi. It can take 10–30 minutes. Progress shows under Activity.', 'Install'))
+    api('/api/demucs/install', {}).then(r => r && watch());
+};
 // ---- reinstall on plug-in (the deck forgets its mods at every power-off)
 let DECKWAS = false, OFFERED = false;
 const savedMods = () => ST.mods && ST.mods.pads !== undefined ? ST.mods : null;
