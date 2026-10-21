@@ -667,7 +667,7 @@ async function state() {
   const hint = $('#deckhint');
   hint.hidden = s.deck || !s.deck_err; hint.textContent = s.deck_err || '';
   $('#deckgo').disabled = !s.deck; $('#pk-theme-send').disabled = !s.deck;
-  $('#ffdot').className = 'dot ' + (s.ffmpeg ? 'ok' : 'warn'); $('#ffline').textContent = s.ffmpeg ? 'ffmpeg is installed.' : 'ffmpeg is missing. “Make stems” needs it (Mac: brew install ffmpeg; Windows: winget install ffmpeg).';
+  $('#ffdot').className = 'dot ' + (s.ffmpeg ? 'ok' : 'warn'); $('#ffline').textContent = s.ffmpeg ? 'ffmpeg + ffprobe are installed.' : 'ffmpeg / ffprobe missing. “Make stems” needs it (Mac: brew install ffmpeg; Windows: winget install ffmpeg).';
   $('#dminst').hidden = !!s.demucs;
   $('#dmdot').className = 'dot ' + (s.demucs ? 'ok' : 'warn'); $('#dmline').textContent = s.demucs ? 'Demucs is installed.' : 'Demucs is not installed. “Make stems” needs it.';
   renderHome(); renderPick();

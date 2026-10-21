@@ -513,6 +513,11 @@ def demucs_ok():
 def j_stems(log, prog, audio, keys=(), quality="opus"):
     if not demucs_ok():
         raise RuntimeError("Demucs is not installed (Settings > Stem separation)")
+    miss = [t for t in ("ffmpeg", "ffprobe") if not shutil.which(t)]
+    if miss:                      # say so now, not after minutes of separating
+        raise RuntimeError(f"{' and '.join(miss)} not found -- Make stems needs them. "
+                           "Mac: brew install ffmpeg (it includes ffprobe); "
+                           "Windows: winget install ffmpeg. Then try again.")
     import re
     with tempfile.TemporaryDirectory() as td:
         log("separating with Demucs (htdemucs) -- a few minutes per track")
@@ -1549,7 +1554,7 @@ class H(BaseHTTPRequestHandler):
                                   "project_ok": os.path.isdir(os.path.join(ROOT, "tools")),
                                   "deck": deck_present(), "deck_err": deck_err(),
                                   "demucs": demucs_ok(),
-                                  "ffmpeg": bool(shutil.which("ffmpeg")),
+                                  "ffmpeg": bool(shutil.which("ffmpeg") and shutil.which("ffprobe")),
                                   "mods": s.get("mods", {}),
                                   "themes": themes,
                                   "themes_ok": bool(themes), "themes_err": _THEME_ERR[0],
