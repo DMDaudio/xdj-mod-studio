@@ -5,16 +5,17 @@ Needs the snapshot tools/hotcue8_emu.py saves (mini stick, track with hot
 cues A-H at 5,13,..61 s loaded): $TMPDIR/hotcue8_loaded.pkl or argv[1].
 Installs the PERFORM pads + the hotcue8 C module exactly like the deck
 installers would, then with REAL touches:
-  HOT CUE tab tap -> page 2 (slots = D,E,F), again -> page 3 (G,H,empty),
-  again -> page 1 (A,B,C); REC tap on page 2 is swallowed (stock REC never
-  sees it); BEAT JUMP tab then HOT CUE tab = a mode change, not a page
-  change; letters drawn (hc_draws > 0) + screenshots/hotcue8/*.png.
+  HOT CUE tab tap (in HOT CUE mode) -> page 2 (slots = D,E,F), again ->
+  page 3 (G,H,empty), again -> page 1 (A,B,C); swipes page both ways
+  too (2026-10-21: tap AND swipe both work -- three testers naturally
+  tapped); REC tap on page 2 is swallowed (stock REC never sees it);
+  BEAT JUMP tab then HOT CUE tab = a mode change, not a page change;
+  letters drawn (hc_draws > 0) + screenshots/hotcue8/*.png.
 """
 import os
 import subprocess
 import sys
 
-os.environ.setdefault("XDJ_HLE_DSP", "1")
 sys.path[:0] = [".", "tools"]
 from emu.machine import Machine          # noqa: E402
 from emu import panl                     # noqa: E402
@@ -86,18 +87,21 @@ def main():
     run(20_000_000)
     tap(709, 37)                                  # PERFORM
     chk("PERFORM open", mem.r32(0x0BA371D4) == 7)
-    chk("cues seen: 8", True)
-    print("slots page 1:", slots())
+    run(30_000_000)                               # a flush -> hc_count refresh
+    s = slots()
+    chk("cues seen: 8", mem.r32(syms["hc_count"]) == 8 and
+        [x[0] for x in s] == [1, 2, 3] and [x[1] for x in s] == TIMES[0:3])
+    print("slots page 1:", s)
     tab = (PP.TAB_X + PP.TAB_W // 2, PP.TAB_Y[0] + PP.TAB_H // 2)
-    # paging is SWIPE-only on the tab (user 2026-10-13): taps only switch
-    # modes; pages step one per horizontal swipe along the tab row.
+    # pages step on a TAP of the tab (2026-10-21) and on a horizontal
+    # SWIPE along the tab row; taps from another mode only switch modes.
     def swipe(x0, x1, y=tab[1]):                  # finger slides along the tab
         for x in (x0, (x0 + x1) // 2, x1):
             dev.panel_frame = panl.build_frame(touch=(x, y))
             run(8_000_000)
         dev.panel_frame = panl.build_frame()
         run(30_000_000)
-    swipe(100, 30)                                # swipe left -> page 2 (D E F)
+    tap(*tab)                                     # tap -> page 2 (D E F)
     s = slots()
     print("page", mem.r8(PP.HCPAGE), "slots", s, "count", mem.r32(syms["hc_count"]))
     chk("page 2 = D E F", mem.r8(PP.HCPAGE) == 1 and
@@ -139,11 +143,15 @@ def main():
     tap(*tab)                                     # back to HOT CUE: mode, no page step
     chk("HOT CUE tab from other mode = mode change only",
         mem.r8(PP.PST + 2) == 0 and mem.r8(PP.HCPAGE) == 1)
+    tap(*tab)                                     # in mode now: tap pages -> page 3
+    chk("tap pages forward", mem.r8(PP.HCPAGE) == 2 and slots()[0][0] == 7)
+    tap(*tab)                                     # -> wraps to page 1
+    chk("tap wraps to page 1", mem.r8(PP.HCPAGE) == 0 and slots()[0][0] == 1)
     run(30_000_000)
     fb_png(m, f"{OUT}/back_to_hc.png")
     mem.w8(MS.MSOFF, 1)                           # MODS OFF: no paging
     tap(*tab)
-    chk("MODS OFF: tab does not page", mem.r8(PP.HCPAGE) == 1)
+    chk("MODS OFF: tab does not page", mem.r8(PP.HCPAGE) == 0)
     print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

@@ -470,8 +470,7 @@ class DspDevice:
                     # honest way to close that gap.
                     for asp in (self.asp1, self.asp2):
                         if self.edma.eer >> asp.dma_ch & 1:
-                            for _ in range(BURST):
-                                self.edma.event(asp.dma_ch)
+                            self.edma.burst(asp.dma_ch, BURST)
                     self.next_slot += SLOT_CYCLES * BURST
                     self._held_n += 1
                     if PAUSE_MUTE and self._held_n >= HELD_BURSTS:

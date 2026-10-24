@@ -263,6 +263,15 @@ def _encode_body(i, e):
     elif m in MPY16:
         op("mpy16"); e.sub = MPY16[m]
         _src(e, ops[0], 0); _src(e, ops[1], 1); e.rd = _reg(ops[2])
+    elif m in ("mpyhi", "mpyli", "mpyhir", "mpylir", "mpyih", "mpyil", "mpyihr", "mpyilr"):
+        op("mpyxi")
+        a, b = (ops[1], ops[0]) if m[3] == "i" else (ops[0], ops[1])   # IH/IL: swapped
+        e.sub = (1 if "h" in m[3:5] else 0) | (2 if m.endswith("r") else 0)
+        _src(e, a, 0); _src(e, b, 1)
+        if e.sub & 2:
+            e.rd = _reg(ops[2])
+        else:
+            e.rd, e.rdh = _pair(ops[2])
     elif m in MPY32:
         e.sub = MPY32[m]; _src(e, ops[0], 0); _src(e, ops[1], 1)
         if ":" in ops[2]:

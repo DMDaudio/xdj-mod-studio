@@ -13,7 +13,7 @@ import subprocess
 import sys
 import tempfile
 
-HOME = os.path.expanduser("~").encode()           # e.g. b"/Users/JamesG"
+HOME = os.path.expanduser("~").encode()           # e.g. b"/Users/<you>"
 USER = os.path.basename(os.path.expanduser("~")).encode()
 NEUTRAL = (b"/Users/" + b"x" * max(1, len(HOME) - 7))[:len(HOME)]
 MACHO = (b"\xcf\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xce\xfa\xed\xfe")

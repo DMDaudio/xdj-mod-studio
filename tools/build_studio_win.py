@@ -45,9 +45,11 @@ update file (XDJ700.UPD from Pioneer DJ's support site). The app checks
 it and builds what it needs (about 5-10 minutes, once).
 
 What is tested on Windows: the app starts, its pages load and its
-built-in checks pass on a clean Windows machine (automated). Installing
-mods to a real deck over USB has NOT been tried on Windows yet - on a Mac
-it is hardware-proven. If you try it, please report what happens.
+built-in checks pass on a clean Windows machine (automated), and testers
+have installed mods on real decks over USB (0.9.5 had gaps -- font tables
+and the bundled deck code were behind the Mac build; 0.9.6 ships the same
+source for both). If anything fails, please report it with the log
+(Settings shows the logs folder).
 
 Not on Windows yet: emulator sound (the emulator runs silent).
 Track Builder needs ffmpeg (and rubberband for key versions) on PATH.

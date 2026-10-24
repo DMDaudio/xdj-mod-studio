@@ -57,6 +57,15 @@ typedef struct {
     uint64_t fb_writes;
     io_rd_t io_rd;
     io_wr_t io_wr;
+    /* everything through pad1 MUST match the pre-fastcore struct layout
+     * exactly (older reference builds bind these fields by offset) */
+    uint32_t idle_pc, idle_skip;
+    uint32_t io_break, exc_n;       /* exc_n: entries in exc[] since drain */
+    uint32_t exc[32][7];            /* spc, offset, code, tea, sr, r15, pr */
+    uint32_t exc_lost, pad1;
+    /* --- appended fields (fastcpu.py Core mirrors this layout; sizes
+     * checked by core_sizeof). NEVER move these before pad1: the layout
+     * above is shared with older reference builds. --- */
     io_rds_t io_rds;
     io_wrs_t io_wrs;
     /* CS6 DSP-bridge register file (mirror of SH7724.cs6; synced with the
@@ -64,10 +73,6 @@ typedef struct {
      * Served here so the firmware's HPI polling never crosses to Python. */
     uint32_t cs6_addr, cs6_ctrl, cs6_run;
     uint64_t cs6_bulk;
-    uint32_t idle_pc, idle_skip;
-    uint32_t io_break, exc_n;       /* exc_n: entries in exc[] since drain */
-    uint32_t exc[32][7];            /* spc, offset, code, tea, sr, r15, pr */
-    uint32_t exc_lost, pad1;
     /* HPID upload log: (dsp_addr u32, value u32) pairs appended on every
      * completed 4-byte write to the CS6 data port 0x180C0000. Read back by
      * fastcpu.py. */
@@ -80,6 +85,16 @@ typedef struct {
     /* cs6_py: route EVERY CS6 access to the Python device (a DSP model /
      * HLE / boot capture is attached there); C then holds no CS6 state. */
     uint32_t cs6_py, cs6_pad;
+    /* --- appended fields (fastcpu.py Core mirrors this layout; sizes
+     * checked by core_sizeof) --- */
+    /* 2DG register-file mirror (emu/tdg.py TDG.reg keys are 16-bit offsets
+     * into 0x04680000; only 0x000-0x0FF is mirrored, the rest crosses). */
+    uint32_t tdg_reg[64];       /* words: (off & 0xFF) >> 2 */
+    uint32_t tdg_ssr;           /* mirror of TDG.ssr */
+    uint64_t tdg_dirty;         /* bit w set = tdg_reg[w] written since sync */
+    uint64_t tdg_dirty_ssr;
+    uint32_t tdg_py;            /* route ALL 2DG traffic to Python (rare) */
+    uint32_t tdg_pad;
 } Core;
 
 /* ------------------------------------------------------------------ */
@@ -177,6 +192,56 @@ static uint32_t *mmu_field(Core *c, uint32_t base)
 #define CS6BASE 0x18000000u
 #define CS6SPAN 0x100000u
 
+/* ------------------------- 2DG accelerator ---------------------------- */
+/* Mirror of emu/tdg.py TDG: register file 0x000-0x0FF served in C from a
+ * 64-word image, everything else (and the SCLR start handshake, which runs
+ * the display list inside the Python device) crosses via io_wrs/io_rds.
+ * Dirty words are pushed Python-ward by fastcpu.py at run boundaries.
+ */
+#define TDG_BASE 0x04680000u
+#define TDG_SPAN 0x10000u
+
+static uint32_t tdg_r8(Core *c, uint32_t a)
+{
+    uint32_t off = a - TDG_BASE;
+    if (off < 0x100u) {
+        uint32_t w = c->tdg_reg[off >> 2];
+        return (w >> ((off & 3u) * 8u)) & 0xFFu;
+    }
+    return c->io_rd(a) & 0xFFu;             /* off-mirror: rare */
+}
+
+static void tdg_wr8(Core *c, uint32_t a, uint32_t v)
+{
+    uint32_t off = a - TDG_BASE;
+    if (off >= 0x100u) {                    /* off-mirror: rare crossing */
+        c->io_wr(a, v & 0xFFu);
+        return;
+    }
+    uint32_t sh = (off & 3u) * 8u;
+    uint32_t w = off >> 2;
+    uint32_t m = 0xFFu << sh;
+    uint32_t cur = c->tdg_reg[w];
+    uint32_t new = (cur & ~m) | ((v << sh) & m);
+    if (w == 2) {                           /* 0x08 SSCR: write-1-to-clear */
+        c->tdg_ssr &= ~((v << sh) & m);
+        c->tdg_reg[w] = new;
+        c->tdg_dirty |= 1ull << w;
+        c->tdg_dirty_ssr = 1;
+        return;
+    }
+    c->tdg_reg[w] = new;
+    c->tdg_dirty |= 1ull << w;
+    if (w == 0 && (new & 1u)) {             /* SCLR start: run the list in
+        Python (side effects live there).  fastcpu's io_wr wrapper syncs
+        the mirror both ways around the real tdg.write. */
+        c->io_wr(a, v & 0xFFu);
+        c->io_break = 1;
+        return;
+    }
+}
+
+/* ------------------------------------------------------------------ */
 static uint32_t cs6_rd8(Core *c, uint32_t a)
 {
     if (c->cs6_py) return c->io_rd(a) & 0xFFu;
@@ -192,8 +257,7 @@ static uint32_t cs6_rd8(Core *c, uint32_t a)
 
 static void cs6_wr8(Core *c, uint32_t a, uint32_t v)
 {
-    if (c->cs6_py) { c->io_wr(a, v & 0xFFu); return; }
-    uint32_t off = a - CS6BASE;
+    if (c->cs6_py) { c->io_wr(a, v & 0xFFu); return; }    uint32_t off = a - CS6BASE;
     if (off < 4u) {
         uint32_t sh = off * 8u;
         c->cs6_ctrl = (c->cs6_ctrl & ~(0xFFu << sh)) | ((v & 0xFFu) << sh);
@@ -281,12 +345,16 @@ static inline uint32_t prd(Core *c, uint32_t p, int n)
         if (n > 1 && (p & (uint32_t)(n - 1)) == 0) {
             /* aligned device access fully outside RAM: one callback.
              * Both ends must miss RAM (a straddling access falls back
-             * to bytes, like before). CS6 stays on the byte path: it is
-             * served in C either way (cs6_rd8), with identical results. */
+             * to bytes, like before). CS6 stays in C (cs6_rd8) on the
+             * byte path, or io_rds once when the Python DSP model is
+             * attached; 2DG reads are served from the mirror. */
             int fb2, ro2;
+            uint32_t dp = p - CS6BASE, tp = p - TDG_BASE;
+            if (dp < CS6SPAN && c->cs6_py && p + (uint32_t)n <= CS6BASE + CS6SPAN)
+                return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
+                              : c->io_rds(p, 2) & 0xFFFFu;
             if (!loc(c, p + (uint32_t)n - 1u, &fb2, &ro2) &&
-                (p - CS6BASE >= CS6SPAN ||
-                 p + (uint32_t)n <= CS6BASE + CS6SPAN))
+                (dp >= CS6SPAN || p + (uint32_t)n <= CS6BASE + CS6SPAN))
                 return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
                               : c->io_rds(p, 2) & 0xFFFFu;
         }
@@ -311,6 +379,7 @@ static inline void pwr(Core *c, uint32_t p, int n, uint32_t v)
         }
         if (n > 1 && (p & (uint32_t)(n - 1)) == 0) {
             int fb2, ro2;
+            uint32_t dp = p - CS6BASE, tp = p - TDG_BASE;
             if (!loc(c, p + (uint32_t)n - 1u, &fb2, &ro2)) {
                 if (n == 4) c->io_wrs(p, v, 4);
                 else c->io_wrs(p, v & 0xFFFFu, 2);

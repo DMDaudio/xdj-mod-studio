@@ -59,6 +59,43 @@ but nobody has tried them on one yet:
 3. Try the mods in the emulator, then connect the deck over USB and click
    **Install**. Power-cycle the deck any time to go back to stock.
 
+## For DJs: OneLibrary USB sticks made readable for the XDJ-700
+
+The XDJ-700 only reads the old Device Library (`PIONEER/rekordbox/export.pdb`).
+Sticks written by newer software — djay, Traktor (via the public OneLibrary
+SDK) or recent rekordbox versions — carry the encrypted SQLite file
+`PIONEER/rekordbox/exportLibrary.db` instead, which the deck ignores.
+
+The bundled converter turns that OneLibrary database into the file the deck
+reads (tracks, artists, albums, genres, labels, keys, colours, playlists with
+folder tree + entries, browse columns and artwork paths — analysis data and
+hot cues are not part of it; the deck will analyse on first play):
+
+```bash
+# Python 3.10+ with wheels available for macOS (incl. Apple Silicon) and Windows
+python3 -m pip install sqlcipher3-wheels
+python3 tools/onelibrary_to_pdb.py /Volumes/YOUR_STICK      # or any stick folder
+```
+
+It writes `PIONEER/rekordbox/export.pdb` next to `exportLibrary.db` and backs
+up any export.pdb already there. It never modifies the original files. Pass
+`--dry-run` to see what it would write, and run the test suite (add your own
+stick with `ONELIBRARY_TEST_STICK=...`):
+
+```bash
+python3 tools/onelibrary_to_pdb_test.py
+```
+
+Fields the converter cannot fill (documented in detail in
+[tools/onelibrary_to_pdb.py](tools/onelibrary_to_pdb.py), `_FIELDS_DOC`):
+play count (the OneLibrary database resets `djPlayCount` to 0 while
+rekordbox's own export keeps old counts), hot-cue/loop data, and a few
+per-track id rows that rekordbox renumbers into historically freed slots on
+its own re-exports (irrelevant to the deck — the link targets are the same).
+`export.pdb` is the first open-source writer of this format ever, built from
+crate-digger's documentation and verified table-by-table against real
+rekordbox exports.
+
 ## For developers
 
 ```bash

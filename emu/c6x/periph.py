@@ -157,6 +157,82 @@ class Edma3:
         else:
             self.er |= 1 << ch
 
+    def burst(self, ch, n):
+        """n hardware DMA events on channel ch, back to back -- the McASP
+        pacing step (dspdev._run) raises BURST of them at once. Same result
+        as n x event(ch) (PaRAM, IPR/interrupt, link reloads, the words the
+        data port receives); the common case (A-sync 4-byte array from RAM
+        to a McASP data port at a fixed address) runs as one tight loop
+        instead of n trips through transfer() and the bus (~40% of the
+        audio-bound run time, 2026-10-21)."""
+        if not (self.eer >> ch & 1):
+            self.stats["events"] += n
+            self.er |= 1 << ch
+            return
+        bus = self.dev.bus
+        p = self.param
+        frm = int.from_bytes
+        while n > 0:
+            b = 32 * ch
+            opt = frm(p[b:b + 4], "little")
+            src = frm(p[b + 4:b + 8], "little")
+            abc = frm(p[b + 8:b + 12], "little")
+            dst = frm(p[b + 12:b + 16], "little")
+            bidx = frm(p[b + 16:b + 20], "little")
+            lnk = frm(p[b + 20:b + 24], "little")
+            cidx = frm(p[b + 24:b + 28], "little")
+            ccnt = frm(p[b + 28:b + 32], "little") & 0xFFFF
+            acnt, bcnt = abc & 0xFFFF, abc >> 16
+            sink = None
+            if (acnt == 4 and bcnt and ccnt and not opt & 0xC
+                    and not bidx >> 16 and not cidx >> 16):
+                dv, _ = bus._dev(dst)
+                sink = getattr(dv, "asp", None)
+            buf, lo = None, 0
+            if sink is not None:
+                for rlo, rhi, rb in bus.ram:
+                    if rlo <= src < rhi:
+                        buf, lo = rb, rlo
+                        break
+            if buf is None or bus.watch:
+                self.stats["events"] += 1   # anything unusual: the general path
+                self.transfer(ch)
+                n -= 1
+                continue
+            sbidx = _s16(bidx & 0xFFFF)
+            scidx = _s16(cidx & 0xFFFF)
+            bcntrld = lnk >> 16
+            out = sink.out
+            muted = getattr(sink.dev, "muted", False)
+            blen = len(buf) - 4
+            done = 0
+            while done < n and ccnt:
+                o = src - lo
+                if o < 0 or o > blen:
+                    break
+                out.append(0 if muted else frm(buf[o:o + 4], "little"))
+                done += 1
+                if bcnt > 1:
+                    src += sbidx
+                    bcnt -= 1
+                else:
+                    src += scidx
+                    bcnt, ccnt = bcntrld, ccnt - 1
+            self.stats["events"] += done
+            self.stats["transfers"] += done
+            n -= done
+            self._pw(ch, 1, src)
+            self._pw(ch, 2, (bcnt << 16) | acnt)
+            self._pw(ch, 7, ccnt)
+            if ccnt == 0:                             # transfer complete
+                self._complete(ch, opt, lnk & 0xFFFF, False)
+            elif done == 0:                           # src left RAM
+                self.stats["events"] += 1
+                self.transfer(ch)
+                n -= 1
+            if len(out) >= sink.keep:
+                sink.trim()
+
     def _p(self, s, w):
         return int.from_bytes(self.param[32 * s + 4 * w:32 * s + 4 * w + 4], "little")
 
@@ -190,6 +266,11 @@ class Edma3:
                 bcnt, ccnt = bcntrld, ccnt - 1
         else:                                        # one frame per event
             s0, d0 = src, dst
+            if sbidx == dbidx == acnt and acnt % 4 == 0:
+                # contiguous frame (Pioneer's 588-word audio blocks): one
+                # copy; _copy falls back to word order if the ranges overlap
+                self._copy(src, dst, acnt * bcnt)
+                bcnt = 0
             for _ in range(bcnt):
                 self._copy(src, dst, acnt)
                 src, dst = src + sbidx, dst + dbidx
@@ -205,24 +286,41 @@ class Edma3:
         self._pw(s, 2, (bcnt << 16) | acnt)
         self._pw(s, 7, ccnt)
         if ccnt == 0:                                # transfer complete
-            if opt >> 20 & 1:                        # TCINTEN
-                tcc = opt >> 12 & 0x3F
-                self.ipr |= 1 << tcc
-                self._irq()
-            if link != 0xFFFF and 0x4000 <= link < 0x8000:
-                o = link - 0x4000
-                self.param[32 * s:32 * s + 32] = self.param[o:o + 32]
-                if qdma:
-                    # the link update writes the QDMA trigger word, which
-                    # submits the new set at once (EDMA3 UG, QDMA linking):
-                    # Pioneer chains L then R (static, TCC 8) this way
-                    self._qdma_check(32 * s, 32)
-            else:                                    # NULL set
-                self.param[32 * s:32 * s + 32] = bytes(20) + \
-                    (0xFFFF).to_bytes(4, "little") + bytes(8)
+            self._complete(s, opt, link, qdma)
+
+    def _complete(self, s, opt, link, qdma):
+        if opt >> 20 & 1:                        # TCINTEN
+            tcc = opt >> 12 & 0x3F
+            self.ipr |= 1 << tcc
+            self._irq()
+        if link != 0xFFFF and 0x4000 <= link < 0x8000:
+            o = link - 0x4000
+            self.param[32 * s:32 * s + 32] = self.param[o:o + 32]
+            if qdma:
+                # the link update writes the QDMA trigger word, which
+                # submits the new set at once (EDMA3 UG, QDMA linking):
+                # Pioneer chains L then R (static, TCC 8) this way
+                self._qdma_check(32 * s, 32)
+        else:                                    # NULL set
+            self.param[32 * s:32 * s + 32] = bytes(20) + \
+                (0xFFFF).to_bytes(4, "little") + bytes(8)
 
     def _copy(self, src, dst, n):
         bus = self.dev.bus
+        if not bus.watch:
+            # RAM to RAM (the audio blocks Pioneer's QDMA moves, 588 words
+            # each way per 1/75 s): one slice copy, same bytes as the word
+            # loop below whenever the two ranges don't overlap
+            sb = db = None
+            for lo, hi, buf in bus.ram:
+                if sb is None and lo <= src and src + n <= hi:
+                    sb, so = buf, src - lo
+                if db is None and lo <= dst and dst + n <= hi:
+                    db, do = buf, dst - lo
+            if sb is not None and db is not None and (
+                    sb is not db or so + n <= do or do + n <= so):
+                db[do:do + n] = sb[so:so + n]
+                return
         for k in range(0, n, 4):
             w = min(4, n - k)
             bus.write(dst + k, w, bus.read(src + k, w))
@@ -243,8 +341,13 @@ class McAsp:
     def __init__(self, dev, name, dma_ch):
         self.dev, self.name, self.dma_ch = dev, name, dma_ch
         self.regs = {}
-        self.out = []                                # 32-bit words written
-        self.keep = 48000 * 2 * 60                   # ~1 min of stereo
+        # 32-bit words written. A plain list (tools slice it), trimmed from
+        # the front when it reaches `keep`; `base` counts the words trimmed
+        # so base + len(out) is the absolute word count. (Until 2026-10-21
+        # the list simply stopped growing after ~1 min: sound died there.)
+        self.out = []
+        self.base = 0
+        self.keep = 44100 * 2 * 120                  # ~2 min of stereo
 
     def read(self, off, n):
         if off == 0xC0:                              # XSTAT: no errors
@@ -273,11 +376,22 @@ class McAsp:
     def slots(self):
         return max(1, bin(self.regs.get(0xB8, 3) & 0xFFFFFFFF).count("1"))
 
+    @property
+    def total(self):
+        return self.base + len(self.out)
+
+    def trim(self):
+        k = len(self.out) - self.keep // 2           # keep the newest half
+        if k > 0:
+            del self.out[:k]
+            self.base += k
+
     def data_write(self, v):
         if getattr(self.dev, "muted", False):
             v = 0                                    # paused deck (dspdev.held)
-        if len(self.out) < self.keep:
-            self.out.append(v & MASK)
+        self.out.append(v & MASK)
+        if len(self.out) >= self.keep:
+            self.trim()
 
 
 class McAspData:

@@ -54,23 +54,23 @@ PC0 = RO.CAVE + 0x3600              # 0x081DBF00 (image zero run -> 0x081E03EB)
 PDRAW = PC0 + 0x5E0  # 0x540 -> 0x5C0: swipe code (2026-10-12); -> 0x5E0 stale-latch fix (2026-10-19)
 # 2026-10-17: incremental BJ paint (+~180 B) -> all units from KSSTEP on
 # shifted +0xB0 (cave zero run reaches PC0+0x44EB, still clear).
-KSDRAW = PC0 + 0x11B0               # KEY SHIFT panel (own unit, calls DRAW)
-PDATA = PC0 + 0x17D0
-PMASK = PC0 + 0x19C8                # u8 stem mute mask (bit V/D/B/O) + drawn
-PST = PC0 + 0x19D0                  # +0 latch +1 page +2 mode +4 drawn state
+KSDRAW = PC0 + 0x11D0                   # KEY SHIFT panel (own unit, calls DRAW)
+PDATA = PC0 + 0x1820
+PMASK = PC0 + 0x1A10                # u8 stem mute mask (bit V/D/B/O) + drawn
+PST = PC0 + 0x1A18                  # +0 latch +1 page +2 mode +4 drawn state
 GATELATCH = PST + 3                 # u8 stock hot-cue pad held (gate arm)
 PSURF, PSTR, PCLIP, PCOL = PST + 8, PST + 12, PST + 16, PST + 20
 PTMP, PFONT, PTMPW = PST + 24, PST + 40, PST + 44
 PSW = PST + 48                      # swipe: u16 down-x, +2 pending code,
                                     # +3 swiped, +4 release frames left
-PADART = PC0 + 0x1A10               # stock hot-cue pad: 63 rows x 22 u16
-FONTP = PC0 + 0x2510                # pad font (14-px caps, digits < > + -)
-FONTT = PC0 + 0x2C50                # tab font (condensed 9-px caps, << >>)
-FONTK = PC0 + 0x3760                # key-name font (condensed bold 13-px)
+PADART = PC0 + 0x1A58               # stock hot-cue pad: 63 rows x 22 u16
+FONTP = PC0 + 0x2558                # pad font (14-px caps, digits < > + -)
+FONTT = PC0 + 0x2C98                # tab font (condensed 9-px caps, << >>)
+FONTK = PC0 + 0x37A8                # key-name font (condensed bold 13-px)
 # room for Windows fonts too: there Arial stands in for Helvetica Neue and
 # the tab/key tables come out ~310 B bigger each (2802 / 3325 B vs 2433 /
 # 2920 on a Mac) -- 2026-10-20 a Windows install hit FONTT's old limit
-PEND = PC0 + 0x44A0
+PEND = PC0 + 0x44E8
 ZERO_END = 0x081E03EB               # the image zero run holding the cave
 assert PEND <= ZERO_END, hex(PEND)
 HCPAGE = PMASK + 2                  # u8 hot cue page (tools/hotcue8 writes)
@@ -90,6 +90,13 @@ MSOFF = MSET.MSOFF                  # 1 = MODS OFF -> PERFORM stays stock
 RT_NOPSITE, RT_KEYWORD = 0x08D36B3A, 0x09D24DD8
 RTKEY, RTMODE = PST + 60, PST + 61      # i8 semitones, u8 1 = real-time panel
 PBUSY = PST + 63                        # PP_GUARD: pblit re-entrancy latch
+# 2026-10-21 freeze fix (tester: MT off -> key shift -> MT on froze the
+# deck): real-time key shift is MT-only by design (the DSP's MT-off
+# resampler path is not wrapped), so the tab is INERT while MT is off and
+# any MT change resets the key to 0 (the MT-on transition with a key
+# armed is the freeze sequence).
+MTW = 0x0B6C4308                        # u8 MASTER TEMPO state (1 = on)
+MTLAST = PST + 62                       # u8 MT state as of the last flush
 # INCREMENTAL PAINT (deck-freeze fix 2026-10-17, CLAUDE.md §109): the whole
 # BJ row (~30 nested draw calls) never enters ONE display flush; 2 pads per
 # flush via this resume byte. Values: 0 fresh, 1 rowclear+pads 0..1,
@@ -114,11 +121,13 @@ HCSW = PC0 + 0x1050                      # HOT CUE tab swipe (own unit, 3 entrie
 # the gap after PDATA). The player keeps the key as a UTF-16 string
 # ("F#m", "Bm", or Camelot "11A") at TRK_KEYSTR (emulator: follows every
 # load; same static data area on the deck).
-TRKKEY = PC0 + 0x1900
+TRKKEY = PC0 + 0x1954
 TRK_KEYSTR = 0x09D30430
 HC_PREVP = HC_BASE + 8 if HC_NEXTP != SAFE_ZERO else SAFE_ZERO
 RTKEEP = PC0 + 0x10E0                   # per-flush key re-assert (own unit)
-KQTAB = PC0 + 0x1150                    # 13 tagged Q20 words, -6..+6
+                                        # 2026-10-21: +MT watch -> the units
+                                        # below moved +0x20/+0x30
+KQTAB = PC0 + 0x1170                    # 13 tagged Q20 words, -6..+6
 KQWORDS = [0x00100000 if s == 0 else 0x40000000 | round(2 ** (s / 12) * (1 << 20))
            for s in range(-6, 7)]
 VKEY = VR.VSCR + 14                 # trailer byte 14: detected key (0 = ?)
@@ -183,6 +192,7 @@ STRINGS = {"key": "STEMS", "mix": "MIX", "mi": "-", "pl": "+",
            "st": "STEMS", "voc": "VOCALS", "drm": "DRUMS", "bas": "BASS",
            "oth": "OTHER", "mute": "MUTE",
            "ib": "[", "if": "]", "lt": "<", "gt": ">", "reset": "RESET",
+           "mtoff": "MT OFF",
            "swl": "[", "swr": "]"}
 NOTE_NAMES = ["C", "C#", "D", "E_", "E", "F", "F#", "G", "A_", "A", "B_", "B"]
 STRINGS.update({f"k{i}": n for i, n in enumerate(NOTE_NAMES)})
@@ -937,6 +947,11 @@ pdraw:
   mov.b @r1,r2
   xor r2,r0
   extu.b r0,r0
+  shll16 r0
+  or r0,r13
+  mov.l @({MTLAST:#x},pc),r1 ; MT change -> redraw (MT OFF strip/chips);
+  mov.b @r1,r0               ; shares byte 2 with page+xor (a simultaneous
+  extu.b r0,r0               ; page+MT flip could mask one repaint: cosmetic)
   shll16 r0
   or r0,r13
   mov.l @({VR.VTBL + 8:#x},pc),r1
@@ -2036,7 +2051,25 @@ ks1:
     + f"  mov r8,r4\n  mov.l @({PTMP:#x},pc),r5\n  bsr signed\n  nop\n" \
     + CTEXT(KSM[0] + 63, KSM[1] + 13, KSM[2] - 64, PTMP, col=KS_DARK) \
     + SETCOL(KS_STRIP) + RECT(KSM[0] + 1, KSM[1] + 41, KSM[2] - 2, 15) \
-    + SETFONT(FONTT) + CTEXT(KSM[0] + 1, KSM[1] + 44, KSM[2] - 2, A["reset"], col=KS_DARK) \
+    + f"""
+  mov.l @({RTMODE:#x},pc),r1   ; real-time mode + MT off -> the strip says
+  mov.b @r1,r0                 ; MT OFF (the tab is inert, see ksstep)
+  tst r0,r0
+  bf ksres0
+  mov.l @({MTW:#x},pc),r1
+  mov.b @r1,r0
+  tst r0,r0
+  bf ksres0
+  mov.l @({A["mtoff"]:#x},pc),r6
+  bra ksstrip
+  nop
+ksres0:
+  mov.l @({A["reset"]:#x},pc),r6
+ksstrip:
+""" + SETFONT(FONTT) \
+    + f"  mov.l @({PTMPW:#x},pc),r1\n  mov.l @({KSM[2] - 2:#x},pc),r0\n  mov.l r0,@r1\n" \
+    + f"  mov.l @({KSM[0] + 1:#x},pc),r4\n  mov.l @({KSM[1] + 44:#x},pc),r5\n" \
+    + f"  mov.l @({KS_DARK:#x},pc),r7\n  bsr ctext\n  nop\n" \
     + f"""
   mov.l @r15+,r14
   mov.l @r15+,r11
@@ -2107,6 +2140,10 @@ avail:                      ; r4 shift -> r0 1 if a version has it (0 = mix)
   mov.b @r1,r0
   tst r0,r0
   bt avnrt
+  mov.l @({MTW:#x},pc),r1   ; MT off: nothing reachable (chips draw dim;
+  mov.b @r1,r0              ; the tab is inert, see ksstep)
+  tst r0,r0
+  bt av0
   mov #6,r0                 ; real-time: -6..+6
   cmp/gt r0,r4
   bt av0
@@ -2251,6 +2288,10 @@ ksstep:                     ; r0 = 60 key down / 61 reset / 62 key up
   extu.w r2,r2              ; n exact (high half is the keycode, not a count)
   tst r2,r2
   bf ksver
+  mov.l @({MTW:#x},pc),r1   ; MASTER TEMPO off -> inert: without MT the DSP
+  mov.b @r1,r0              ; plays through its resampler path, which the
+  tst r0,r0                 ; key-shift cave does not wrap (freeze fix
+  bt ksret                  ; 2026-10-21); presses change nothing
   mov.l @({RTKEY:#x},pc),r6
   mov.b @r6,r0              ; signed semitones
   mov #61,r2
@@ -2400,9 +2441,22 @@ hccall:
 hcret:
   rts
   mov #0,r0
-hcrel:                      ; r1 = PST: a plain tap does NOT page any
-  mov #0,r0                 ; more (user 2026-10-13: paging by SWIPE only)
-  mov.b r0,@r1              ; drop the latch
+hcrel:                      ; r1 = PST: release on the tab. A swipe already
+  mov.l @({PSW:#x},pc),r3   ; paged (hcheld); since 2026-10-21 a plain TAP
+  mov.b @(3,r3),r0          ; pages forward too (three testers naturally
+  tst r0,r0                 ; tapped; swipe and tap both work now)
+  bt hctap
+  bra hcrd
+  nop
+hctap:
+  mov #0,r0
+  mov.b r0,@r1              ; drop the latch first (hc_next may repaint)
+  mov.l @({HC_NEXTP:#x},pc),r2
+  bra hcgo                  ; null-safe via hccall (SAFE_ZERO = no hotcue8)
+  nop
+hcrd:
+  mov #0,r0                 ; drop the latch
+  mov.b r0,@r1
   rts
   mov #0,r0
 .pool
@@ -2410,9 +2464,29 @@ hcrel:                      ; r1 = PST: a plain tap does NOT page any
 
 
 RTKEEP_SRC = f"""
-rtkeep:                     ; every flush: the deck clears 0x09D24DD8 when a
-  mov.l @({RT_NOPSITE:#x},pc),r1   ; track (re)loads -> put our key back
-  mov.w @r1,r0              ; (only r0-r3; r4-r7 are the flush's args)
+rtkeep:                     ; every flush: (1) a MASTER TEMPO change resets
+  mov.l @({MTW:#x},pc),r1   ; the real-time key to 0 -- arming a key while
+  mov.b @r1,r0              ; MT is off and switching MT on froze a deck
+  mov.l @({MTLAST:#x},pc),r2  ; (2026-10-21); MTLAST tracks MT per flush
+  mov.b @r2,r3
+  cmp/eq r0,r3
+  bt rkmt
+  mov.b r0,@r2
+  mov.l @({RTKEY:#x},pc),r1
+  mov.b @r1,r0
+  tst r0,r0
+  bt rkmt
+  mov #0,r0
+  mov.b r0,@r1
+  add #6,r0
+  shll2 r0
+  mov.l @({KQTAB:#x},pc),r1
+  mov.l @(r0,r1),r1
+  mov.l @({RT_KEYWORD:#x},pc),r2
+  mov.l r1,@r2
+rkmt:
+  mov.l @({RT_NOPSITE:#x},pc),r1   ; (2) the deck clears 0x09D24DD8 when a
+  mov.w @r1,r0              ; track (re)loads -> put our key back
   extu.w r0,r0
   cmp/eq #9,r0
   bf rkx
@@ -2810,7 +2884,7 @@ def blobs():
     assert FONTK + len(fk) <= PEND, len(fk)
     init = struct.pack("<II", 0, 0) + struct.pack("<IIII", 0, 0, 800, 0)
     init += b"\0" * (64 - len(init))    # through PST+63: PBUSY starts clear
-    assert PDATA + len(_DATA) <= TRKKEY and TRKKEY + len(tk) <= PC0 + 0x19C8, len(tk)
+    assert PDATA + len(_DATA) <= TRKKEY and TRKKEY + len(tk) <= PMASK, len(tk)
     return [(PC0, h), (PDRAW, d), (KSSTEP, st), (HCSW, hs), (RTKEEP, rk), (KQTAB, kq), (KSDRAW, k),
             (TRKKEY, tk),
             (PDATA, _DATA), (PST, init), (RTKEY, b"\0\0"),
@@ -2982,6 +3056,8 @@ def emu():
     site = mem.r16(RT_NOPSITE)
     mem.w32(VR.VTBL + 8, 0)
     mem.w16(RT_NOPSITE, 0x0009)
+    mem.w8(MTW, 1)            # real-time keys are MT-only since the freeze
+    run(6_000_000)            # fix; let a flush sync MTLAST first
     rt, kw = [], []
     for tag, xy in (("up", R), ("up", R), ("reset", M), ("down", L), ("down", L),
                     ("down", L)):
@@ -2997,6 +3073,21 @@ def emu():
     for _ in range(3):
         tap(M, "rt_reset_end") if _ == 0 else None
     ok &= chk("rt reset", mem.r8(RTKEY) == 0 and mem.r32(RT_KEYWORD) == KQWORDS[6])
+    # MT gating (freeze fix 2026-10-21): inert while MT is off, any MT
+    # change resets the key to 0
+    mem.w8(MTW, 0)
+    tap(R, "rt_mtoff_up")
+    ok &= chk("mt off inert", mem.r8(RTKEY) == 0 and mem.r32(RT_KEYWORD) == KQWORDS[6])
+    mem.w8(MTW, 1)
+    tap(R, "rt_mton_up")
+    tap(R, "rt_mton_up2")
+    ok &= chk("mt on steps", mem.r8(RTKEY) == 2)
+    mem.w8(MTW, 0)          # MT off -> the flush watch resets the key
+    run(6_000_000)
+    ok &= chk("mt change resets key", mem.r8(RTKEY) == 0 and mem.r32(RT_KEYWORD) == KQWORDS[6])
+    mem.w8(MTW, 1)
+    run(6_000_000)
+    ok &= chk("mt on no key", mem.r8(RTKEY) == 0)
     mem.w16(RT_NOPSITE, site)
     mem.w32(VR.VTBL + 8, ncount)
     mem.w8(VKEY, 0)

@@ -17,9 +17,10 @@ What is modeled (all values measured live in the emulator, Oct 2026):
     with emulated time (44100 Hz). Served as the model's position word
     on the C10 stream head; logged.
   * TIME handshake (Oct 2026, cache/emu_track_loaded.pkl lineage):
-      SH position word [0x09D246E0] (75 Hz, = pos_samples//588) is
-      advanced by tick() while mode==5; firmware derives POSL
-      @0x0C0E6D1C = 2x (150/s, proven by forcing) -> snapshot copy
+      SH position word [0x09D246E0] (75 Hz, = pos_samples//588) and
+      POSL [0x0C0E6D1C] (= 2x, 150/s -- the time digits' source; its
+      SH_POS twin freezes on a real deck, sec. 103) are advanced by
+      tick() while mode==5; POSL -> snapshot copy
       0x08DC8B9E (384 B 0x0C0E6C90->0x0C0E6AF4, POSL @+140) ->
       formatter 0x08DBC104. TRACKLEN [0x0BA3C050] is set to a valid
       nonzero (8000000, gate: POS<=TL) when a track is loaded
@@ -31,7 +32,8 @@ What is modeled (all values measured live in the emulator, Oct 2026):
       DSP consumption message beyond single-word HPI answers (30+
       prior probes: CD0/BF8/stream patterns all ignored) -- audio
       streaming stays stubbed; TIME does not need it.
-    Guest-RAM writes by the model: [0x09D246E0] + [0x0BA3C050] ONLY,
+    Guest-RAM writes by the model: [0x09D246E0] + [0x0C0E6D1C] +
+      [0x0BA3C050] ONLY,
     ONLY when XDJ_HLE_DSP=1 (else tick() never runs: hle is None).
     Rekordbox audio files are still read-only (ffmpeg decode only).
   * Shadow audio: the loaded track is identified by byte-matching the
@@ -58,7 +60,10 @@ BUF0, BUF1, BLOCK = 0x0E910B00, 0x0E91FB40, 0x24C0
 CPUFREQ = 500_000_000
 SAMPLE_RATE = 44100
 # TIME handshake (SH side; all verified by forcing in emu_track_loaded.pkl):
-SH_POS = 0x09D246E0    # SH position word: firmware derives POSL=2x
+SH_POS = 0x09D246E0    # SH position word (75 Hz units)
+POSL = 0x0C0E6D1C      # live time-struct position (150 Hz = 2x SH_POS);
+                       # what the time digits + the phase meter read. Frozen
+                       # on a real deck's SH_POS twin, driven there by the DSP
 POS_DIV = 588          # 44100 Hz samples -> 75 Hz SH units (150/s POSL)
 TRACKLEN = 0x0BA3C050  # gate: formatter needs nonzero and POS<=TL
 FIXED_TL = 8000000     # ~148 h at 150/s: always passes, proven no crash
@@ -165,8 +170,9 @@ class HleDsp:
             return 0
 
     # -- play clock + TIME handshake (called from SH7724.tick) --------
-    # Guest writes: [SH_POS] + [TRACKLEN] ONLY, ONLY when XDJ_HLE_DSP=1
-    # (this object exists only then; default off: hle is None, no writes).
+    # Guest writes: [SH_POS] + [POSL] + [TRACKLEN] ONLY, ONLY when
+    # XDJ_HLE_DSP=1 (this object exists only then; default off: hle is
+    # None, no writes).
     def tick(self, cyc):
         self.n_ticks += 1
         mode = self._mode()
@@ -179,9 +185,12 @@ class HleDsp:
             except Exception as e:
                 self.prime_error = repr(e)
         # TIME handshake: supply TRACKLEN once a track is loaded, advance
-        # SH_POS with the play clock while playing. Firmware derives
-        # POSL=2x -> snapshot -> formatter; screen redraws on its own
-        # (the LCD "UI flip" is just the next frame after POS changes).
+        # SH_POS with the play clock while playing. On a real deck the DSP
+        # data drives POSL (the time digits' source, CLAUDE.md sec. 103:
+        # SH_POS freezes on silicon while the clock moves); the firmware's
+        # own SH_POS->POSL derivation does not run in every emulated state,
+        # so the model advances POSL=2x directly -- the emulated clock and
+        # the phase meter (tools/phasemeter/pm.c reads POSL) both move.
         try:
             mem = self.dev.mem
             if mode in (MODE_PAUSED, MODE_PLAYING):
@@ -200,13 +209,22 @@ class HleDsp:
                     self.pos_samples = 0
                     try:
                         mem.w32(SH_POS, 0)
+                        mem.w32(POSL, 0)
                     except Exception:
                         pass
                     return
                 want = (self.pos_samples // POS_DIV) & 0xFFFFFFFF
-                if want != cur:
+                if cur != want:
+                    # a jump bigger than 1 s means someone else wrote SH_POS
+                    # (a test seeking the playhead, or the firmware at a
+                    # track load): adopt it as the clock instead of
+                    # overwriting it -- POSL then follows in one tick
+                    if abs(cur - want) > 75:
+                        self.pos_samples = cur * POS_DIV
+                        want = cur
                     try:
                         mem.w32(SH_POS, want)
+                        mem.w32(POSL, (want * 2) & 0xFFFFFFFF)
                     except Exception:
                         pass
         except Exception:

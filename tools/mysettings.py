@@ -68,7 +68,11 @@ MSEND = MS + 0x820
 # no proven-free home yet -> a word that is always zero (push = no-op)
 THEME_TABLE = 0x081DD7FC if os.environ.get("THEMESW_DISABLE") else TS.TS_BASE
 
-LABELS = ["[THEME]", "[MODS]", "[WAVEFORM]", "[HOT CUE]", "[VINYL BRAKE]"]
+# Kind order = popup order; with >2 stock rows (Pro DJ Link adds
+# [BACKGROUND COLOR]) the popup's 7-row limit drops the HIGHEST kind.
+# [HOT CUE] is last on purpose (2026-10-21): the gate is the one mod row
+# worth losing on a linked deck; [VINYL BRAKE] must stay reachable.
+LABELS = ["[THEME]", "[MODS]", "[WAVEFORM]", "[VINYL BRAKE]", "[HOT CUE]"]
 NROWS = len(LABELS)
 TITLES = ["WAVE FORM COLOR", "KEY / STEMS"]
 WAVES = ["BLUE", "RGB", "3-BAND"]
@@ -248,10 +252,10 @@ vs0:
   mov.l @({A["waves"]:#x},pc),r1
   rts
   mov.l @(r0,r1),r5
-vsver:                      ; 3 = HOT CUE gate (OFF/GATE), 4 = VINYL BRAKE
+vsver:                      ; 3 = VINYL BRAKE, 4 = HOT CUE gate (OFF/GATE)
   add #-1,r0
   cmp/eq #0,r0
-  bt vsgate
+  bf vsgate
   mov.l @({MSBRAKE:#x},pc),r1
   mov.b @r1,r0
   extu.b r0,r0
@@ -429,10 +433,10 @@ pm2:
 pk0:
   bra papplied
   mov.b r0,@r1
-pm3:                        ; 3 = HOT CUE: OFF -> GATE -> OFF; 4 = BRAKE
+pm3:                        ; 3 = VINYL BRAKE: next length, applied now; 4 = HOT CUE
   add #-1,r0
   cmp/eq #0,r0
-  bt pm3g
+  bf pm3g
   mov.l @({MSBRAKE:#x},pc),r1  ; 4 = VINYL BRAKE: next length, applied now
   mov.b @r1,r0
   add #1,r0
@@ -633,33 +637,33 @@ def emu():
     goto(0)
     print("rows:", rows())
     ok &= row_text(0).startswith("[THEME]")
-    goto(3)
+    goto(4)
     key("RotaryPush")                       # HOT CUE -> GATE
     print(f"HOT CUE push: gate={mem.r8(MSGATE)}")
     ok &= mem.r8(MSGATE) == 1
-    goto(3)
+    goto(4)
     print("rows:", rows())
-    ok &= row_text(3).endswith("GATE")
+    ok &= row_text(4).endswith("GATE")
     key("RotaryPush")                       # HOT CUE -> OFF
     ok &= mem.r8(MSGATE) == 0
-    goto(3)
+    goto(4)
     print("rows:", rows())
-    ok &= row_text(3).endswith("OFF")
+    ok &= row_text(4).endswith("OFF")
     # [VINYL BRAKE]: each push = next length, K literal written at once
-    ok &= mem.r32(BRAKE_LIT) == BRAKE_STOCK and row_text(4).endswith("1X")
+    ok &= mem.r32(BRAKE_LIT) == BRAKE_STOCK and row_text(3).endswith("1X")
     seq = []
     for _ in range(len(BRAKES)):
-        goto(4)
+        goto(3)
         key("RotaryPush")
         seq.append((mem.r8(MSBRAKE), mem.r32(BRAKE_LIT)))
     print("VINYL BRAKE pushes:", seq)
     ok &= [k for k, _ in seq] == [1, 2, 3, 4, 5, 0]
     ok &= all(v == int(BRAKE_STOCK * BRAKES[k][1]) for k, v in seq)
-    goto(4)
+    goto(3)
     key("RotaryPush")                       # -> 2X
-    goto(4)
+    goto(3)
     print("rows:", rows())
-    ok &= row_text(4).endswith("2X")
+    ok &= row_text(3).endswith("2X")
     goto(1)
     key("RotaryPush")                       # MODS OFF -> stock brake
     ok &= mem.r32(BRAKE_LIT) == BRAKE_STOCK

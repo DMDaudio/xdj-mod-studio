@@ -95,7 +95,7 @@ UIHTML = os.path.join(BUNDLE, "studio", "ui.html") if FROZEN else os.path.join(H
 
 APP_SUPPORT = app_support_dir()
 # the app's own release number (GitHub release tag v<APP_VERSION>)
-APP_VERSION = "0.9.5"
+APP_VERSION = "0.9.6"
 RELEASES_API = "https://api.github.com/repos/inter55/xdj-mod-studio/releases/latest"
 RELEASES_PAGE = "https://github.com/inter55/xdj-mod-studio/releases/latest"
 SETTINGS = os.path.join(APP_SUPPORT, "studio.json")
@@ -175,6 +175,14 @@ if FROZEN:      # bundled emu/studio win; project tools/mods are data on disk
     sys.path.extend([os.path.join(ROOT, "tools"), os.path.join(ROOT, "mods")])
 else:
     sys.path[:0] = [ROOT, os.path.join(ROOT, "tools"), os.path.join(ROOT, "mods")]
+# a checkout of the public repo has no build/ (gitignored): stage the
+# committed prebuilt deck modules once, so deck installs and UPD builds
+# find them wherever the app runs from (packaged apps already carry them)
+try:
+    import shbuild
+    shbuild.stage_prebuilt(ROOT)
+except Exception:
+    pass
 
 import numpy as np
 from PIL import Image
@@ -1257,14 +1265,14 @@ SESSION_S = 55.0            # per session incl. 30 s cool-down (mock-deck model)
 
 
 def j_deck_install(log, prog, mode, pads=True,
-                   themes=True, liveks=False, phase=False, brake=0.0):
+                   themes=True, liveks=False, phase=False, brake=0.0, flac=True):
     if not deck_present():
         raise RuntimeError("deck not connected (USB)")
     try:
         s = settings()
         s["mods"] = {"mode": mode, "pads": bool(pads), "themes": bool(themes),
                      "liveks": bool(liveks), "phase": bool(phase),
-                     "brake": float(brake or 0)}
+                     "brake": float(brake or 0), "flac": bool(flac)}
         save_settings(s)
     except Exception:
         pass
@@ -1277,6 +1285,8 @@ def j_deck_install(log, prog, mode, pads=True,
         args.append("--keyshift")
     if phase and pads:
         args.append("--phasemeter")
+    if not flac:
+        args.append("--no-flac")
     if brake and brake != 1:
         args += ["--brake", f"{brake:g}"]
     plan = {pre: n for pre, _, n in INSTALL_STEPS}
@@ -1292,6 +1302,8 @@ def j_deck_install(log, prog, mode, pads=True,
         plan["5k"] = 0
     if not (phase and pads):
         plan["5m"] = 0
+    if not flac:
+        plan["5h"] = 0
     if not brake or brake == 1:
         plan["5v"] = 0
     order = [pre for pre, _, _ in INSTALL_STEPS]
@@ -1358,7 +1370,7 @@ def j_deck_install(log, prog, mode, pads=True,
 UPD_ACKS = ("brick", "recovery", "power")
 
 
-def j_upd_build(log, prog, upd, mode, pads, versions, banner):
+def j_upd_build(log, prog, upd, mode, pads, versions, banner, extras=()):
     """PERMANENT mode: build a modded update file from the user's OWN
     official XDJ-700 v1.15 .UPD (tools/permanent_build.py), then boot it in
     the emulator from reset. Writes a file only -- the app never flashes."""
@@ -1371,6 +1383,8 @@ def j_upd_build(log, prog, upd, mode, pads, versions, banner):
         args.append("--no-pads")
     if not versions:
         args.append("--no-versions")
+    if extras:
+        args += ["--extras", ",".join(extras)]
     prog(0.0, "Building the update file", eta=90)
     rc, txt = run_tool(log, args)
     if rc or "RESULT: built" not in txt:
@@ -1386,10 +1400,23 @@ def j_upd_build(log, prog, upd, mode, pads, versions, banner):
         raise RuntimeError("the emulator boot test FAILED -- do NOT flash it "
                            f"(kept as {bad} for inspection)")
     with open(os.path.join(out_dir, "READ ME FIRST.txt"), "w") as f:
-        f.write(UPD_README.format(banner=banner, mode=mode))
+        names = [UPD_EXTRA_NAMES[e] for e in UPD_EXTRAS if e in extras]
+        f.write(UPD_README.format(
+            banner=banner, mode=mode,
+            extras="".join(f"- {n} (copied into place at every power-on)\n"
+                           for n in names) or "- (no extras ticked)\n",
+            usb=", ".join([n for e, n in UPD_EXTRA_NAMES.items() if e not in extras]
+                          + ["theme switching", "FLAC & Opus"])))
     log(f"ready: {out}")
     prog(1.0, "Built + boot-tested. Read the warnings before flashing.")
 
+
+UPD_EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift")
+UPD_EXTRA_NAMES = {"centre": "coloured centre waveform",
+                   "phasemeter": "phase meter",
+                   "hotcue8": "8 hot cues (HOT CUE tab paging)",
+                   "stems": "live stems (STEMS tab)",
+                   "keyshift": "live key shift (KEY SHIFT tab, MASTER TEMPO on)"}
 
 UPD_README = """XDJ-700 MODDED UPDATE FILE (firmware {banner}) -- READ BEFORE FLASHING
 
@@ -1415,9 +1442,9 @@ BEFORE YOU FLASH
 WHAT IS BAKED IN ({mode} waveform)
 - overview waveform colours, key/stem version switching, MY SETTINGS rows,
   PERFORM pads (BEAT JUMP / KEY SHIFT / STEMS tabs).
-NOT baked (still installed over USB from the app after each power-on):
-- coloured centre waveform, hot cue pages, theme switching, live stems,
-  FLAC, live key shift.
+{extras}NOT baked (still installed over USB from the app after each power-on):
+- {usb}.
+  Themes and FLAC/Opus are too big for the space the firmware file has.
 
 GOING BACK TO STOCK
 Flash the official v1.15 file the same way (its version differs, so the
@@ -1791,10 +1818,13 @@ class H(BaseHTTPRequestHandler):
                 s_["upd"] = upd
                 save_settings(s_)
                 banner = str(b.get("banner") or "1.16")
+                pads = bool(b.get("pads", True))
+                extras = tuple(e for e in UPD_EXTRAS if e in (b.get("extras") or ())
+                               and (pads or e not in ("hotcue8", "stems")))
                 return self.send({"job": job("Build permanent update (UPD)", j_upd_build,
-                                             upd, b.get("mode", "rgb"),
-                                             bool(b.get("pads", True)),
-                                             bool(b.get("versions", True)), banner)})
+                                             upd, b.get("mode", "rgb"), pads,
+                                             bool(b.get("versions", True)), banner,
+                                             extras)})
             if p == "/api/deck/install":
                 return self.send({"job": job("Install mods on deck", j_deck_install,
                                              b.get("mode", "rgb"),
@@ -1802,7 +1832,8 @@ class H(BaseHTTPRequestHandler):
                                              bool(b.get("themes", True)),
                                              bool(b.get("liveks", False)),
                                              bool(b.get("phase", False)),
-                                             float(b.get("brake") or 0))})
+                                             float(b.get("brake") or 0),
+                                             flac=bool(b.get("flac", True)))})
         except (BrokenPipeError, ConnectionResetError):
             raise
         except Exception as e:

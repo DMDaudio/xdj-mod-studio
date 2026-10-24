@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
 """phasemeter_test.py -- Type 1 phase meter cave, emulator check.
 
-Snapshot cache/emu_rgb_daveamstrong.pkl = main screen, "Make Your Move
-(Olav Basoski Remix)" loaded (beat grid in the ANLZ ctx). Installs
+Snapshot cache/emu_track_loaded.pkl (deck_session's play-test lineage: a
+track is loaded and the HLE play clock chain is alive). Installs
 build/phasemeter/pm.bin (tools/phasemeter/build.sh) at its link address,
-chains the 2DG flush hook, sets the play position [0x09D246E0] to a few
-values and checks the drawn red/grey tick columns on the blue row against
-the Python model (tools/phase_meter.py maths, beat grid read from the
-track's own .DAT). Also: Browse open -> nothing drawn over the list.
+chains the 2DG flush hook, snapshots the beat grid, then plays/-seeks the
+clock to a few positions and checks the drawn red/grey tick columns on
+the blue row against a Python model built from pm's OWN cave arrays.
+
+Position: pm.c reads POSL [0x0C0E6D1C] (150/s) = the time digits' source.
+On a real deck the DSP data drives it (the elapsed clock visibly moves,
+CLAUDE.md sec. 103) while its 75 Hz twin [0x09D246E0] -- the old source,
+which made the meter stand still on hardware -- freezes at the load
+position. In the emulator the HLE advances POSL with the play clock and
+adopts SH_POS writes > 1 s as seeks, so the test jumps the playhead by
+writing SH_POS while playing and compares at the POSL the deck holds.
+
+Also: Browse open -> nothing drawn over the list.
 Screens: screenshots/phasemeter_*.png
 """
 import os
+os.environ.setdefault("XDJ_HLE_DSP", "1")   # before emu.machine import: the
+                                            # model that advances POSL while
+                                            # the emulated deck plays
 import struct
 import sys
 sys.path[:0] = [".", "tools"]
@@ -20,12 +32,11 @@ from ghosttap_emu import fb_png
 
 OUT = "build/phasemeter"
 HOOK = 0x08C92E20
-SH_POS = 0x09D246E0
-UI = 0x09D52B00
-DAT = os.path.expanduser("~/Downloads/Rekordbox stuff/PIONEER/USBANLZ/P025/"
-                         "00003141/ANLZ0000.DAT")
+POSL = 0x0C0E6D1C    # 150/s, what pm.c reads and what the HLE advances
+SH_POS = 0x09D246E0  # 75/s; a write > 1 s off seeks the HLE play clock
+MODE = 0x0B6C4264    # 5 = playing, 3 = paused (HLE play clock gate)
+PREVIEW = 0x0BA3BCCC  # pm snapshots the grid when this changes
 X0, X1, CX, BY = 260, 471, 366, 150
-RED, TICK = 0xE145, 0x94B2       # RGB(226,40,40), RGB(150,150,150) in 565
 
 
 def syms():
@@ -36,16 +47,9 @@ def syms():
     return out
 
 
-def grid():
-    b = open(DAT, "rb").read()
-    q = b.find(b"PQTZ")
-    n = struct.unpack(">I", b[q + 20:q + 24])[0]
-    return [struct.unpack(">HHI", b[q + 24 + 8 * k:q + 32 + 8 * k]) for k in range(n)]
-
-
 def model(g, ms):
-    """expected {x: 'red'|'tick'} on the blue row"""
-    ts = [t for _, _, t in g]
+    """expected {x: 'red'|'tick'} on the blue row (g = [(bar, ms)])"""
+    ts = [t for _, t in g]
     if ms < ts[0]:
         return {}
     lo = max(i for i, t in enumerate(ts) if t <= ms)
@@ -56,18 +60,48 @@ def model(g, ms):
         if not 0 <= j < len(ts):
             continue
         num = ((k << 8) - frac) * (X1 - X0)
-        x = CX + int(num / (8 << 8))          # C division truncates toward 0
+        q = abs(num) // (8 << 8)            # C integer division: truncates
+        x = CX + (q if num >= 0 else -q)    # toward zero, not floor
         if not X0 <= x <= X1 or abs(x - CX) <= 1:
             continue                          # off-ruler / under the white line
         out[x] = "red" if g[j][0] == 1 else "tick"
     return out
 
 
+def read_grid(mem, s):
+    """[(bar, ms)] from pm's own cave arrays (what pm.c draws against)"""
+    n = mem.r32(s["pm_n"])
+    if not 2 <= n <= 4000:
+        return []
+    ms = mem.r_block(s["pm_ms"], 4 * n)
+    bar = mem.r_block(s["pm_bar"], n)
+    return [(bar[i], struct.unpack_from("<I", ms, 4 * i)[0]) for i in range(n)]
+
+
+def install_grid(mem, bpm=128.0, n=1000):
+    """Write a synthetic beat grid into the ANLZ ctx (the emu_track_loaded
+    track was loaded without one: PQTZ tag present, n=0). 8 B per beat:
+    [u8 bar 1..4][pad][u32 ms LE] -- the same records rekordbox writes."""
+    CTX_TAB, PQTZ_OFF = 0x09826BE4, 0xD7C
+    GRID = 0x0BC00000                      # high DDR scratch
+    assert mem.r_block(GRID, 64) == b"\0" * 64, "grid scratch not free"
+    step = 60000 / bpm                     # ms per beat
+    blob = bytearray()
+    for i in range(n):
+        blob += bytes([(i % 4) + 1, 0, 0, 0]) + struct.pack("<I", int(i * step))
+    for i, b in enumerate(blob):
+        mem.w8(GRID + i, b)
+    ctx = mem.r32(CTX_TAB)
+    mem.w32(ctx + PQTZ_OFF + 0x14, n)
+    mem.w32(ctx + PQTZ_OFF + 0x18, GRID)
+    return [((i % 4) + 1, int(i * step)) for i in range(n)]
+
+
 def main():
     s = syms()
     base = s["pm_entry"]
     img = open(f"{OUT}/pm.bin", "rb").read()
-    m = Machine.load("cache/emu_rgb_daveamstrong.pkl")
+    m = Machine.load("cache/emu_track_loaded.pkl")
     mem, c = m.mem, m.cpu
     end = s["pm_mode"] + 4
     assert all(mem.r8(a) == 0 for a in range(base, end, 4)), "cave not empty"
@@ -78,16 +112,23 @@ def main():
     mem.w8(s["pm_mode"], 1)
     mem.w32(HOOK, base)
     print(f"cave {base:#x}..{end:#x}, chained prev {prev:#x}")
-    g = grid()
-    ok = True
-    for i, pos in enumerate((1500, 1537, 2200, 4000)):
-        mem.w32(SH_POS, pos)
+    mem.w32(MODE, 5)                      # playing
+    want_grid = install_grid(mem)
+    mem.w32(PREVIEW, mem.r32(PREVIEW) ^ 1)  # force a grid snapshot
+    m.cpu.run(limit=30_000_000)
+    g = read_grid(mem, s)
+    print(f"grid: {len(g)} beats" + (f", first {g[0]}, last {g[-1]}" if g else ""))
+    ok = len(g) >= 2
+    for i, target_ms in enumerate((20000, 20493, 29333, 53333)):
+        mem.w32(MODE, 5)                       # playing again for the seek
+        mem.w32(SH_POS, target_ms * 3 // 40)   # 75 Hz seek (HLE adopts)
+        m.cpu.run(limit=15_000_000)            # adopt + draw at the position
+        mem.w32(MODE, 3)                       # pause: POSL stops moving
         d0 = mem.r32(s["pm_draws"])
-        m.cpu.run(limit=30_000_000)
+        m.cpu.run(limit=20_000_000)            # flushes at the frozen POSL
         d1 = mem.r32(s["pm_draws"])
-        L = mem.r32(s["pm_layer"]) & 0x1FFFFFFF
-        print("   layer", hex(L), "row145 sample", [hex(mem.r16(L + (145 * 800 + x) * 2)) for x in (270, 297, 298, 323)])
-        print(f"   after run: SH_POS={mem.r32(SH_POS):#x} pm_n={mem.r32(s['pm_n'])}")
+        posl = mem.r32(POSL)
+        ms = posl * 20 // 3
         fb_png(m, f"screenshots/phasemeter_{i}.png")
         # check the COMPOSED screen: the stock painter still repaints its
         # boxes into the layer between flushes; our hook redraws inside
@@ -102,14 +143,12 @@ def main():
                 got[x] = "red"
             elif 130 <= r <= 170 and abs(r - g_) < 12 and abs(r - b) < 12:
                 got[x] = "tick"
-        red_x = sorted({x if got.get(x) == "red" and got.get(x - 1) != "red" else None
-                        for x in got} - {None})
-        want = model(g, pos * 40 // 3)
+        want = model(g, ms)
         # red is drawn 2 px wide (x-1, x): compare by the right column
         got_n = {x: v for x, v in got.items() if not (v == "red" and got.get(x + 1) == "red")}
         match = got_n == want
         ok &= match and d1 > d0
-        print(f"pos {pos} ({pos*40//3} ms): draws +{d1-d0}, "
+        print(f"POSL {posl} ({ms} ms): draws +{d1-d0}, "
               f"{'MATCH' if match else 'DIFF'} got {sorted(got_n.items())} want {sorted(want.items())}")
     # Browse open: the list covers the meter -> must not be painted over
     mem.dev.panel_frame = panl.build_frame(keys=["Browse"])

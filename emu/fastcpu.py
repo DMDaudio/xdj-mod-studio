@@ -49,17 +49,20 @@ class Core(ctypes.Structure):
                  ("flash", vp), ("flash_len", u32), ("pad0", u32),
                  ("ram0", vp), ("ram1", vp), ("fb0", vp), ("fb1", vp),
                  ("misc", vp), ("sq", vp), ("fb_writes", u64),
-                  ("io_rd", IO_RD), ("io_wr", IO_WR),
-                  ("io_rds", IO_RDS), ("io_wrs", IO_WRS),
-                  ("cs6_addr", u32), ("cs6_ctrl", u32), ("cs6_run", u32),
-                  ("cs6_bulk", u64),
+                 ("io_rd", IO_RD), ("io_wr", IO_WR),
                  ("idle_pc", u32), ("idle_skip", u32),
                  ("io_break", u32), ("exc_n", u32),
                  ("exc", (u32 * 7) * 32), ("exc_lost", u32), ("pad1", u32),
+                  ("io_rds", IO_RDS), ("io_wrs", IO_WRS),
+                  ("cs6_addr", u32), ("cs6_ctrl", u32), ("cs6_run", u32),
+                  ("cs6_bulk", u64),
                  ("hpid_buf", vp), ("hpid_n", u64), ("hpid_cap", u64),
                  ("hpid_acc", u32), ("hpid_addr", u32), ("hpid_cnt", ctypes.c_uint8),
                  ("hpid_pad", ctypes.c_uint8 * 3), ("hpid_bytes", u64),
-                 ("cs6_py", u32), ("cs6_pad", u32)])
+                 ("cs6_py", u32), ("cs6_pad", u32),
+                 ("tdg_reg", u32 * 64), ("tdg_ssr", u32),
+                 ("tdg_dirty", u64), ("tdg_dirty_ssr", u64),
+                 ("tdg_py", u32), ("tdg_pad", u32)])
 
 
 _lib = None
@@ -72,15 +75,21 @@ def load_lib():
     if _lib is not None:
         return _lib
     try:
-        # a bundled app ships the compiled library without the source
-        # (Windows: the app ships a prebuilt DLL and there is no compiler)
-        if sys.platform != "win32" and os.path.exists(SRC) and (not os.path.exists(LIB) or
-                os.path.getmtime(LIB) < os.path.getmtime(SRC)):
-            tmp = LIB + ".tmp"
-            subprocess.check_call(["cc", "-O2", "-shared", "-fPIC", "-o", tmp,
-                                   SRC, "-lm"])
-            os.replace(tmp, LIB)
-        lib = ctypes.CDLL(LIB)
+        # XDJ_FASTCORE_LIB: load a specific build (tools/differ.py uses it to
+        # compare the current fastcore.c against a compiled reference copy).
+        alt = os.environ.get("XDJ_FASTCORE_LIB")
+        if alt and os.path.exists(alt):
+            lib = ctypes.CDLL(alt)
+        else:
+            # a bundled app ships the compiled library without the source
+            # (Windows: the app ships a prebuilt DLL and there is no compiler)
+            if sys.platform != "win32" and os.path.exists(SRC) and (not os.path.exists(LIB) or
+                    os.path.getmtime(LIB) < os.path.getmtime(SRC)):
+                tmp = LIB + ".tmp"
+                subprocess.check_call(["cc", "-O2", "-shared", "-fPIC", "-o", tmp,
+                                       SRC, "-lm"])
+                os.replace(tmp, LIB)
+            lib = ctypes.CDLL(LIB)
     except (OSError, subprocess.CalledProcessError):
         return None
     lib.core_run.argtypes = [ctypes.POINTER(Core), u64, ctypes.POINTER(u64)]
@@ -90,10 +99,26 @@ def load_lib():
     lib.core_read_virt.argtypes = [ctypes.POINTER(Core), u32, ctypes.c_int,
                                    ctypes.POINTER(ctypes.c_int)]
     lib.core_read_virt.restype = u32
-    lib.core_hpid.argtypes = [ctypes.POINTER(Core), ctypes.POINTER(u64)]
-    lib.core_hpid.restype = ctypes.POINTER(u32)
+    _alt = os.environ.get("XDJ_FASTCORE_LIB")
     if lib.core_sizeof() != ctypes.sizeof(Core):
-        raise RuntimeError("fastcore.c / fastcpu.py struct layout mismatch")
+        # a reference build (XDJ_FASTCORE_LIB) predating the newest fields is
+        # fine: the C side reads its own (shorter) struct prefix only, and the
+        # extra ctypes tail just stays untouched.  Anything else is a bug.
+        if not (_alt and 0 < ctypes.sizeof(Core) - lib.core_sizeof() <= 512):
+            raise RuntimeError("fastcore.c / fastcpu.py struct layout mismatch")
+    try:
+        lib.core_hpid  # noqa: B018 (pre-capture reference builds lack it)
+    except AttributeError:
+        # a reference build predating the capture: inject a stub by hand
+        # (CDLL.__getattr__ dlsyms on first touch, so go around it)
+        def _stub(_c, n):
+            n.contents.value = 0
+            return 0          # NULL: no words captured
+        _fn = ctypes.CFUNCTYPE(ctypes.c_void_p,
+                               ctypes.POINTER(Core), ctypes.POINTER(u64))(_stub)
+        object.__setattr__(lib, "core_hpid", _fn)
+        _fn.argtypes = [ctypes.POINTER(Core), ctypes.POINTER(u64)]
+        _fn.restype = ctypes.c_void_p
     _lib = lib
     return lib
 
@@ -126,6 +151,12 @@ class FastSH4:
         self._pins = None
         self._pin_ids = None
         self._py = None
+        # cached word-read helper (emu.usb_fast), imported once, not per crossing
+        try:
+            from emu.usb_fast import fast_io_read
+            self._fast_io = fast_io_read
+        except ImportError:
+            self._fast_io = None
         dev_rd, dev_wr = self._io_rd, self._io_wr
         self._cb_rd = IO_RD(dev_rd)
         self._cb_wr = IO_WR(dev_wr)
@@ -263,8 +294,37 @@ class FastSH4:
         self.core.cs6_run = d.get("run", 0) & 0xFFFFFFFF
         self.core.cs6_bulk = d.get("bulk", 0) & 0xFFFFFFFFFFFFFFFF
 
+    # -- 2DG register-file mirror (emu/tdg.py TDG) ---------------------------
+    def _tdg_out(self):
+        """Flush the C 2DG register mirror into the Python device."""
+        t = getattr(self.mem.dev, "tdg", None)
+        if t is None:
+            return
+        c = self.core
+        for w in range(64):
+            if c.tdg_dirty >> w & 1:
+                t.reg[w * 4] = c.tdg_reg[w] & 0xFFFFFFFF
+        if c.tdg_dirty:
+            c.tdg_dirty = 0
+        if c.tdg_dirty_ssr:
+            t.ssr = c.tdg_ssr & 0xFFFFFFFF
+            c.tdg_dirty_ssr = 0
+
+    def _tdg_in(self):
+        """Adopt the Python device's 2DG registers into C."""
+        t = getattr(self.mem.dev, "tdg", None)
+        if t is None:
+            return
+        c = self.core
+        for i in range(64):
+            c.tdg_reg[i] = t.reg.get(i * 4, 0) & 0xFFFFFFFF
+        c.tdg_dirty = 0
+        c.tdg_ssr = t.ssr & 0xFFFFFFFF
+        c.tdg_dirty_ssr = 0
+
     def __getstate__(self):
         self._cs6_out()
+        self._tdg_out()
         c = self.core
         d = {n: getattr(c, n) for n in _REGS}
         d.update(b0=self.b0, b1=self.b1, rhi=self.rhi, fr=self.fr,
@@ -301,6 +361,7 @@ class FastSH4:
         c.hpid_addr = 0
         c.hpid_cnt = 0
         self._cs6_in()
+        self._tdg_in()
 
     # -- memory binding -------------------------------------------------------
     def _bind(self):
@@ -320,9 +381,35 @@ class FastSH4:
         self._pins = (pins, fl, m.flash)
         self._pin_ids = ids
 
+    def _cached_dspemu(self):
+        """The live-DSP device (cs6_py route): cached after first hit."""
+        d = getattr(self, "_cs6_dev", None)
+        if d is None:
+            d = self.mem.dev
+            if getattr(d, "dspemu", None) is not None:
+                object.__setattr__(self, "_cs6_dev", d)
+        return d
+
     def _io_rd(self, a):
+        a &= 0xFFFFFFFF
+        # CS6 (live DSP): straight to the word-semantic reader; the generic
+        # read where the SDK bridge sits LAST among a dozen range checks and
+        # the HPI poll crosses hundreds of thousands of times per second.
+        if 0x18000000 <= a < 0x18100000:
+            try:
+                return self._cached_dspemu()._cs6_read(a, 1) & 0xFF
+            except Exception as e:
+                self._io_err = repr(e)
+                object.__setattr__(self, "_cs6_dev", None)
+                return 0
+        is2dg = 0x04680000 <= a < 0x04690000
         try:
-            return self.mem.dev.read(a, 1) & 0xFF
+            if is2dg:
+                self._tdg_in()
+            v = self.mem.dev.read(a, 1) & 0xFF
+            if is2dg:
+                self._tdg_out()
+            return v
         except Exception as e:           # a device bug must not kill the core
             self._io_err = repr(e)
             return 0
@@ -333,9 +420,24 @@ class FastSH4:
         # (IPR/IMR/IMCR). Most device writes (GPIO strobes, DMA/2DG setup)
         # do neither, and breaking on each cost ~half the run time.
         dev = self.mem.dev
+        a &= 0xFFFFFFFF
+        if 0x18000000 <= a < 0x18100000:
+            try:
+                self._cached_dspemu()._cs6_write(a, 1, v & 0xFF)
+                return                      # HPIC/HPIA never raise interrupts
+            except Exception as e:
+                self._io_err = repr(e)
+                object.__setattr__(self, "_cs6_dev", None)
+                self.core.io_break = 1
+                return
+        is2dg = 0x04680000 <= a < 0x04690000
         try:
             before = len(dev.pending)
+            if is2dg:
+                self._tdg_in()               # C mirror -> python regs first
             dev.write(a, 1, v)
+            if is2dg:
+                self._tdg_out()              # ...then python -> C mirror
             if len(dev.pending) != before or (a & 0x1FFF0000) == 0x04080000:
                 self.core.io_break = 1
         except Exception as e:
@@ -346,19 +448,37 @@ class FastSH4:
         # One crossing instead of n: the device still sees n identical
         # byte accesses in order (same triggers, same FIFO pops), so this
         # is exactly _io_rd x n with less ctypes overhead.
+        a &= 0xFFFFFFFF
+        is2dg = 0x04680000 <= a < 0x04690000
+        cs6 = is2dg or (0x18000000 <= a < 0x18100000)
         try:
+            if cs6:
+                d = self._cached_dspemu()
+                if is2dg:
+                    self._tdg_in()
+                if not is2dg:
+                    # the C64x co-simulation is time-locked PER BYTE ACCESS
+                    # (every sync() call feeds the DSP clock), so the bytes
+                    # must be seen one at a time even in one crossing
+                    v = 0
+                    for i in range(n):
+                        v |= d._cs6_read(a + i, 1) << (8 * i)
+                    return v & ((1 << (8 * n)) - 1)
             # Fast path (XDJ_USB_FAST=1): single word-sized dev.read where
             # trivially safe (USB + generic stub); else the loop below.
-            try:
-                from emu.usb_fast import fast_io_read
-                fv = fast_io_read(self.mem.dev, a, n)
+            fi = self._fast_io
+            if fi is not None:
+                fv = fi(self.mem.dev, a, n)
                 if fv is not None:
                     return fv
-            except ImportError:
-                pass
+            if is2dg:
+                self._tdg_in()
             v = 0
+            dev_read = self.mem.dev.read
             for i in range(n):
-                v |= self.mem.dev.read(a + i, 1) << (8 * i)
+                v |= dev_read(a + i, 1) << (8 * i)
+            if is2dg:
+                self._tdg_out()
             return v
         except Exception as e:
             self._io_err = repr(e)
@@ -366,14 +486,28 @@ class FastSH4:
 
     def _io_wrs(self, a, v, n):
         dev = self.mem.dev
+        a &= 0xFFFFFFFF
+        if 0x18000000 <= a < 0x18100000:
+            try:
+                d = self._cached_dspemu()
+                cs6_write = d._cs6_write
+                for i in range(n):             # byte-by-byte (see _io_rds)
+                    cs6_write(a + i, 1, (v >> (8 * i)) & 0xFF)
+                return
+            except Exception as e:
+                self._io_err = repr(e)
+                object.__setattr__(self, "_cs6_dev", None)
+                self.core.io_break = 1
+                return
+        is2dg = 0x04680000 <= a < 0x04690000
+        if is2dg:
+            self._tdg_in()
         try:
-            # NOTE: word-sized write batching (usb_fast.fast_io_write) is
-            # intentionally NOT used: even generic-stub batching changes
-            # UI timing enough to divert browse navigation (337 vs 1143
-            # ops). Writes stay byte-wise; reads are the safe win.
             before = len(dev.pending)
             for i in range(n):
                 dev.write(a + i, 1, (v >> (8 * i)) & 0xFF)
+            if is2dg:
+                self._tdg_out()
             if len(dev.pending) != before or (a & 0x1FFF0000) == 0x04080000:
                 self.core.io_break = 1
         except Exception as e:

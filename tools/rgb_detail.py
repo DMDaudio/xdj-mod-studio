@@ -87,9 +87,16 @@ def cw_build():
         subprocess.run(["sh", "tools/centre/build.sh"], check=True, env=env,
                        capture_output=True, cwd=R)
     elif not os.path.exists(pre):
-        # shipped apps carry the prebuilt module (tools/build_studio.sh)
-        raise FileNotFoundError("centre colour module not built "
-                                "(needs work/sh-tools or build/centre)")
+        # last resort: a checkout of the public repo carries the compiled
+        # module in prebuilt/deck (build/ is gitignored there)
+        alt = [os.path.join(R, "prebuilt/deck/centre", f)
+               for f in ("cw.bin", "cw.syms")]
+        if all(os.path.exists(a) for a in alt):
+            pre, presyms = alt
+        else:
+            # shipped apps carry the prebuilt module (tools/build_studio.sh)
+            raise FileNotFoundError("centre colour module not built "
+                                    "(needs work/sh-tools or build/centre)")
     syms = {}
     for ln in open(presyms):
         a_, _, n_ = ln.split()

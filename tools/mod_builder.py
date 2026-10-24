@@ -114,7 +114,10 @@ def main():
         import modapp
         stock = a.upd or STOCK
         if not os.path.isfile(stock):
-            sys.exit(f"stock firmware not found: {stock} (pass --upd XDJ700.UPD)")
+            from emu import fw          # app/public checkout: the user's
+            stock = fw.find_upd() or stock      # own firmware home
+        if not stock or not os.path.isfile(stock):
+            sys.exit(f"stock firmware not found: {STOCK} (pass --upd XDJ700.UPD)")
         modapp.STOCK = stock
         job = {"log": []}
         outpath = os.path.join(ROOT, "build", f"XDJ700_{a.name}.UPD")

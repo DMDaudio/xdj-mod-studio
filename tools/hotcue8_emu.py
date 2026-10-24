@@ -17,7 +17,6 @@ import shutil
 import struct
 import sys
 
-os.environ.setdefault("XDJ_HLE_DSP", "1")
 sys.path[:0] = [".", "tools"]
 import numpy as np                       # noqa: E402
 
@@ -27,6 +26,13 @@ TRACK = ("Contents/Aaron Carl/The Greatest House Acappellas/"
          "aaron_carl_-_house_music-sq.mp3")
 TIMES = [5000 + 8000 * i for i in range(8)]          # A..H in ms
 ROT = 0x0B6C7B48
+# 2026-10-21: the old lineage (cache/emu_realusb.pkl + XDJ_HLE_DSP=1)
+# loads the track but the fake DSP errors the load partway -- the cues
+# never commit to the ctx list / live slots (0xFFFF), so the snapshot the
+# gate consumed had NO cues and every page check below it was vacuous.
+# A real-DSP mounted snapshot finishes the load.
+SNAP = os.environ.get("SNAP", "cache/emu_dsp_mounted6.pkl")
+CTX_TAB, PCOB_OFF, SLOTS = 0x09826BE4, 0xFC0, 0x0B6C4118
 
 
 def pcpt(n, ms):
@@ -104,6 +110,29 @@ def find_times(m):
     return hits
 
 
+def find_cue(m, n):
+    """same walk as hc.c find_cue(): entry address for cue n or 0"""
+    mem = m.mem
+    ctx = mem.r32(CTX_TAB)
+    if not ctx or mem.r32(ctx + PCOB_OFF) != 0x424F4350 \
+            or mem.r16(ctx + PCOB_OFF + 0x0E) != 1:
+        return 0
+    total = min(mem.r16(ctx + PCOB_OFF + 0x12), 8)
+    seen = 0
+    g = ctx + PCOB_OFF + 0x20
+    while seen < total and g < ctx + PCOB_OFF + 0x40:
+        cnt, e = mem.r32(g), mem.r32(g + 4)
+        if not cnt or cnt > 8 or not 0x08000000 <= e < 0x10000000:
+            break
+        for k in range(cnt):
+            if mem.r16(e + 0x0E) == n:
+                return e
+            e += 0x40
+        seen += cnt
+        g += 8
+    return 0
+
+
 def main():
     from emu.machine import Machine
     from emu import panl
@@ -114,7 +143,7 @@ def main():
         os.environ.get("TMPDIR", "/tmp"), "hotcue8stick")
     build(stick)
     print("mini stick:", stick)
-    m = Machine.load("cache/emu_realusb.pkl")
+    m = Machine.load(SNAP)
     mem, dev = m.mem, m.mem.dev
 
     def key(k, n=15_000_000):
@@ -129,7 +158,7 @@ def main():
     disk = open_disk(stick)
     dev.usb_disk = disk
     u.stick = MassStorage(disk)
-    for _ in range(6):
+    for _ in range(10):
         m.cpu.run(limit=250_000_000)
     key("Browse")
     mem.w16(ROT, (mem.r16(ROT) + 1) & 0xFFFF)
@@ -140,6 +169,20 @@ def main():
     key("RotaryPush", 400_000_000)        # load the (only) track
     m.cpu.run(limit=300_000_000)
     fb_png(m, "screenshots/hotcue8_loaded.png")
+    # GATE (2026-10-21): refuse to save a cue-less snapshot -- the ctx
+    # list must carry A..H and the live slots A-C, or every paging check
+    # that consumes this state is vacuous.
+    cues = [find_cue(m, i) for i in range(1, 9)]
+    n = sum(1 for c in cues if c)
+    live = []
+    for k in range(3):
+        s = SLOTS + k * 0x40
+        live.append((mem.r16(s + 0x08), mem.r16(s + 0x0A), mem.r32(s + 0x0C)))
+    print(f"ctx cues A..H: {n}/8 found; live slots (state,num,ms): {live}")
+    if n != 8 or not all(st == 6 and nm == k + 1 and ms == TIMES[k]
+                         for k, (st, nm, ms) in enumerate(live)):
+        print("RESULT: FAIL - track loaded without its cues; NOT saving")
+        return 1
     hits = find_times(m)
     found = {}
     for (unit, fmt, i), idx in hits.items():
@@ -151,15 +194,16 @@ def main():
             continue
         for a0 in per[0]:
             for stride in range(4, 0x200, 4):
-                n = 1
-                while n < 8 and (a0 + n * stride) in per.get(n, []):
-                    n += 1
-                if n >= 3:
+                n2 = 1
+                while n2 < 8 and (a0 + n2 * stride) in per.get(n2, []):
+                    n2 += 1
+                if n2 >= 3:
                     print(f"cue table? {unit} {fmt} @ {a0:#010x} stride {stride}: "
-                          f"{n} of 8 cues in a row")
+                          f"{n2} of 8 cues in a row")
     print("cues found anywhere (unit, fmt): count of A..H present ->",
           {k: sorted(v) for k, v in found.items() if len(v) >= 3})
     m.save(os.path.join(os.path.dirname(stick), "hotcue8_loaded.pkl"))
+    print("saved hotcue8_loaded.pkl")
     return 0
 
 

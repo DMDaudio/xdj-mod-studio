@@ -159,6 +159,13 @@ def main():
                     help="also 5k: real-time key shift (live patch of the audio "
                          "chip, no restart; opt-in until proven on hardware)")
     a = ap.parse_args()
+    # public checkouts have no build/ output (gitignored): stage the
+    # committed prebuilt deck modules so the *apply tools find them
+    try:
+        import shbuild
+        shbuild.stage_prebuilt()
+    except Exception:
+        pass
     # 2026-10-12 lesson (session 5 freeze): every mod together must PLAY in
     # the emulator before anything goes on a deck. ~3 min.
     ckpt = os.environ.get("CKPT", "cache/emu_track_loaded.pkl")
@@ -334,6 +341,9 @@ def main():
           f"load a track. Waveform = {a.mode}; PERFORM has BEAT JUMP / "
           f"HOT CUE / KEY SHIFT / STEMS; BROWSE > MENU > MY SETTINGS has "
           f"the mod rows.")
+    print("If the stick was in the deck at any point during the install: "
+          "eject it and put it back once, so the deck re-reads the file "
+          "types (otherwise FLAC/Opus files still show 'unsupported').")
 
 
 if __name__ == "__main__":

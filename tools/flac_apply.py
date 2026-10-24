@@ -163,6 +163,9 @@ def main():
             if rd32(h, SLOTS[n]) != s[n]:
                 sys.exit(f"FAIL: {n} verify - REBOOT the deck")
         print("RESULT: PASS - insert the stick: FLAC files list and play like WAV")
+        print("  (if the stick was in the deck at ANY point during the install,")
+        print("   eject it and put it back: the deck sorts files into types")
+        print("   when a stick goes in -- until then FLAC shows 'unsupported')")
         return 0
     finally:
         h.close()

@@ -19,6 +19,14 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <stddef.h>
+
+/* the hot helpers inlined into step(): +15-20% (2026-10-21) */
+#if defined(__GNUC__) || defined(__clang__)
+#define ALWAYS __attribute__((always_inline))
+#else
+#define ALWAYS
+#endif
 
 typedef uint32_t u32;
 typedef int32_t s32;
@@ -36,7 +44,7 @@ typedef int64_t s64;
  OP(sploop) OP(spctl) OP(dint) OP(rint) OP(idle) \
  OP(fadd) OP(fsub) OP(fmul) OP(intsp) OP(spint) OP(spdp) OP(dpsp) \
  OP(dadd) OP(dsub) OP(dmul) OP(fcmp) OP(dcmp) OP(abssp) OP(rcpsp) OP(swap2) \
- OP(mvd)
+ OP(mvd) OP(mpyxi)
 
 #define OP(n) O_##n,
 enum { OPS O_COUNT };
@@ -75,7 +83,11 @@ enum { E_ST, E_LD, E_REG, E_CTRL, E_PYLD };
 typedef struct { uint8_t type, size, lo, hi, sx; u32 addr; u64 val; } Ev;
 #define RING 16
 #define EVMAX 128
-typedef struct { int n; Ev e[EVMAX]; } Bucket;
+/* per-cycle bucket: register writes (the bulk) in their own lean lane,
+ * everything else (stores, loads, control writes) as Ev; `types` set when
+ * a memory event is present. Register and control writes touch different
+ * state, so applying the two lanes separately keeps the result exact. */
+typedef struct { int n; int types; int rn; uint8_t ri[EVMAX]; u32 rv[EVMAX]; Ev e[EVMAX]; } Bucket;
 
 typedef u32 (*mmio_rd_t)(u32 addr, int size);
 typedef void (*mmio_wr_t)(u32 addr, int size, u32 val);
@@ -101,6 +113,10 @@ enum { K_SPLOOP, K_SPLOOPD, K_SPLOOPW };
 enum { ST_OK, ST_NEED, ST_ERR, ST_STOP, ST_IDLE };
 
 #define NPEND 16
+/* execute packet starting at an address: members (Ins indexes) and the
+ * address after it (headers skipped) -- fetch_ep's work done once */
+struct EPC { u32 pc, nxt; int n, succ; int32_t idx[16]; };   /* succ: packet at nxt, -1 unknown */
+
 typedef struct {
     u32 r[64];
     u32 c[C_NCTRL];
@@ -118,6 +134,10 @@ typedef struct {
     SPLoop sp;
     Ins *ins;
     int nins, cap;
+    int32_t *epi;      /* per Ins: execute-packet cache entry, -1 unknown */
+    struct EPC *epc; int nepc, capepc;
+    int lastreg;       /* ram(): region of the last hit */
+    int hint, prevep, lastf;   /* step(): expected next packet, last run, last fetched */
     u32 *hkey; int32_t *hval; u32 hmask;
     Region reg[16];
     int nreg;
@@ -132,7 +152,7 @@ typedef struct {
 } Core;
 
 /* ================================================== code table ======== */
-static u32 hslot(Core *c, u32 a)
+static inline u32 hslot(Core *c, u32 a)
 {
     u32 h = (a * 2654435761u) & c->hmask;
     while (c->hkey[h] != 0xFFFFFFFFu && c->hkey[h] != a)
@@ -140,7 +160,7 @@ static u32 hslot(Core *c, u32 a)
     return h;
 }
 
-static Ins *find(Core *c, u32 a)
+static inline ALWAYS Ins *find(Core *c, u32 a)
 {
     u32 h = hslot(c, a);
     return c->hkey[h] == a ? &c->ins[c->hval[h]] : 0;
@@ -154,14 +174,22 @@ Core *c6x_new(int hbits)
     c->hval = malloc(sizeof(int32_t) << hbits);
     memset(c->hkey, 0xFF, sizeof(u32) << hbits);
     c->c[C_CSR] = 0x14000100;
+    c->hint = c->prevep = c->lastf = -1;
     return c;
 }
 
-void c6x_free(Core *c) { free(c->ins); free(c->hkey); free(c->hval); free(c); }
+void c6x_free(Core *c) { free(c->ins); free(c->epi); free(c->epc); free(c->hkey); free(c->hval); free(c); }
 int c6x_sizeof_ins(void) { return sizeof(Ins); }
 int c6x_sizeof_core(void) { return sizeof(Core); }
 u32 *c6x_regs(Core *c) { return c->r; }
 u32 *c6x_ctrl(Core *c) { return c->c; }
+
+static void ep_flush(Core *c)
+{
+    if (c->epi) memset(c->epi, 0xFF, sizeof(int32_t) * c->cap);
+    c->nepc = 0;
+    c->hint = c->prevep = c->lastf = -1;
+}
 
 static void rehash(Core *c)
 {
@@ -181,12 +209,14 @@ int c6x_add_code(Core *c, const Ins *v, int n)
         if (c->nins == c->cap) {
             c->cap = c->cap ? c->cap * 2 : 65536;
             c->ins = realloc(c->ins, sizeof(Ins) * c->cap);
+            c->epi = realloc(c->epi, sizeof(int32_t) * c->cap);
         }
         if ((u32)(c->nins + 1) * 2 > c->hmask) return -1;
         c->ins[c->nins] = v[i];
         c->hkey[h] = v[i].addr;
         c->hval[h] = c->nins++;
     }
+    ep_flush(c);           /* new code can extend or change packets */
     return c->nins;
 }
 
@@ -198,9 +228,10 @@ void c6x_drop_code(Core *c, u32 lo, u32 hi)
             c->ins[w++] = c->ins[i];
     c->nins = w;
     rehash(c);
+    ep_flush(c);
 }
 
-void c6x_clear_code(Core *c) { c->nins = 0; rehash(c); }
+void c6x_clear_code(Core *c) { c->nins = 0; rehash(c); ep_flush(c); }
 
 /* ================================================== memory ============ */
 void c6x_set_cb(Core *c, mmio_rd_t r, mmio_wr_t w, pyop_t p, pyld_t l)
@@ -214,9 +245,14 @@ void c6x_add_region(Core *c, u32 lo, u32 size, uint8_t *buf)
 
 static inline uint8_t *ram(Core *c, u32 a, int n)
 {
+    Region *g = &c->reg[c->lastreg];
+    if (a >= g->lo && (u64)a + n <= g->hi)
+        return g->buf + (a - g->lo);
     for (int i = 0; i < c->nreg; i++)
-        if (a >= c->reg[i].lo && (u64)a + n <= c->reg[i].hi)
+        if (a >= c->reg[i].lo && (u64)a + n <= c->reg[i].hi) {
+            c->lastreg = i;
             return c->reg[i].buf + (a - c->reg[i].lo);
+        }
     return 0;
 }
 
@@ -253,20 +289,32 @@ static Ev *ev_new(Core *c, u64 w)
     return &b->e[b->n++];
 }
 
+/* memory events (stores/loads) make commit() scan for them */
+static inline void ev_mem(Core *c, u64 w)
+{
+    c->ring[w % RING].types = 1;
+}
+
 static inline void wr(Core *c, u64 w, int idx, u32 v)
-{ Ev *e = ev_new(c, w); e->type = E_REG; e->lo = (uint8_t)idx; e->val = v; }
+{
+    Bucket *b = &c->ring[w % RING];
+    if (b->rn == EVMAX) { c->err = 3; c->status = ST_ERR; return; }
+    b->ri[b->rn] = (uint8_t)idx; b->rv[b->rn++] = v;
+    c->evcount++;
+}
 
 static inline void wrc(Core *c, u64 w, int idx, u32 v)
 { Ev *e = ev_new(c, w); e->type = E_CTRL; e->lo = (uint8_t)idx; e->val = v; }
 
 static inline void st(Core *c, u64 w, u32 a, int n, u64 v)
-{ Ev *e = ev_new(c, w); e->type = E_ST; e->addr = a; e->size = (uint8_t)n; e->val = v; }
+{ Ev *e = ev_new(c, w); e->type = E_ST; e->addr = a; e->size = (uint8_t)n; e->val = v; ev_mem(c, w); }
 
 static inline void ld(Core *c, u64 issue, u32 a, int n, int lo, int hi, int sx)
 {
     Ev *e = ev_new(c, issue + 3);
     e->type = E_LD; e->addr = a; e->size = (uint8_t)n;
     e->lo = (uint8_t)lo; e->hi = (uint8_t)hi; e->sx = (uint8_t)sx;
+    ev_mem(c, issue + 3);
 }
 
 static void branch(Core *c, u64 issue, u32 t)
@@ -287,6 +335,7 @@ void c6x_ldpy(Core *c, u64 issue, u32 a, int n, u32 id)
 {
     Ev *e = ev_new(c, issue + 3);
     e->type = E_PYLD; e->addr = a; e->size = (uint8_t)n; e->val = id;
+    ev_mem(c, issue + 3);
 }
 void c6x_stop(Core *c) { c->status = ST_STOP; }
 
@@ -297,11 +346,12 @@ static void ctrl_set(Core *c, int i, u32 v)
     if (i == C_TSR) c->c[C_CSR] = (c->c[C_CSR] & ~1u) | (v & 1);
 }
 
-static void commit(Core *c, u64 cyc)
+static inline ALWAYS void commit(Core *c, u64 cyc)
 {
     Bucket *b = &c->ring[cyc % RING];
     int n = b->n;
-    if (!n) return;
+    if (!n) goto regs;
+    if (!b->types) goto ctrl;
     for (int i = 0; i < n; i++)
         if (b->e[i].type == E_ST) {
             Ev *e = &b->e[i];
@@ -330,13 +380,20 @@ static void commit(Core *c, u64 cyc)
         }
     }
     n = b->n;
+ctrl:
     for (int i = 0; i < n; i++) {
         Ev *e = &b->e[i];
-        if (e->type == E_REG) c->r[e->lo] = (u32)e->val;
-        else if (e->type == E_CTRL) ctrl_set(c, e->lo, (u32)e->val);
+        if (e->type == E_CTRL) ctrl_set(c, e->lo, (u32)e->val);
     }
     c->evcount -= n;
     b->n = 0;
+    b->types = 0;
+regs:;
+    int rn = b->rn;
+    if (!rn) return;
+    for (int i = 0; i < rn; i++) c->r[b->ri[i]] = b->rv[i];
+    c->evcount -= rn;
+    b->rn = 0;
 }
 
 /* ================================================== helpers =========== */
@@ -406,7 +463,7 @@ static u32 next_addr(Core *c, u32 a)
 static void sp_start(Core *c, const Ins *i);
 
 /* one instruction; returns nop cycles (0 = none). Predicate included. */
-static int exec1(Core *c, const Ins *i, u64 cyc)
+static inline ALWAYS int exec1(Core *c, const Ins *i, u64 cyc)
 {
     if (i->op == O_py) {
         c->py_calls++;
@@ -615,6 +672,13 @@ static int exec1(Core *c, const Ins *i, u64 cyc)
         wr(c, w, i->rd, r);
         return 0;
     }
+    case O_mpyxi: {   /* MPYHI/MPYLI(R): sub bit0 a-hi, bit1 round; a 16-bit, b 32-bit */
+        u32 a = A(c, i), b = B(c, i);
+        s64 p = (s64)(int16_t)(i->sub & 1 ? a >> 16 : a) * (s64)(s32)b;
+        if (i->sub & 2) wr(c, cyc + 3, i->rd, (u32)((p + 0x4000) >> 15));
+        else { wr(c, cyc + 3, i->rd, (u32)p); wr(c, cyc + 3, i->rdh, (u32)((u64)p >> 32)); }
+        return 0;
+    }
     case O_abssp: wr(c, cyc, i->rd, fout(fabs(fin(A(c, i))))); return 0;
     case O_rcpsp: {
         double x = fin(A(c, i)), v;
@@ -636,7 +700,14 @@ static int exec1(Core *c, const Ins *i, u64 cyc)
 static void sp_start(Core *c, const Ins *i)
 {
     SPLoop *s = &c->sp;
-    memset(s, 0, sizeof(*s));
+    /* reset (not a 13 KB memset per loop start): the scalar head, the
+     * valid flags the last loop could have set (stages < its lc + 1), and
+     * the small tails; bl/bi/bu are only read below nbuf */
+    int oldlc = s->lc < SPLC ? s->lc + 1 : SPLC;
+    memset(s, 0, offsetof(SPLoop, bl));
+    memset(s->valid, 0, oldlc);
+    memset(s->pv, 0, sizeof s->pv);
+    s->npv = 0; memset(s->hist, 0, sizeof s->hist); s->nhist = 0;
     s->kind = i->sub; s->ii = i->k[0];
     s->wcreg = i->sub == K_SPLOOPW ? i->creg : -1; s->wcneg = i->cneg;
     s->loading = s->fetch_prog = 1;
@@ -701,7 +772,7 @@ static void sp_boundary(Core *c)
             s->drain >= s->post_delay)
             sp_exit_fetch(c);
         if (s->dynlen >= 0 && s->drain >= s->dynlen - s->ii) {
-            memset(s->valid, 0, sizeof s->valid);
+            memset(s->valid, 0, s->lc < SPLC ? s->lc + 1 : SPLC);
             if (s->int_drain) {                     /* §7.13.4 */
                 c->sp_on = 0;
                 c->c[C_TSR] &= ~SPLX;
@@ -729,7 +800,7 @@ static void sp_boundary(Core *c)
     if (s->kind == K_SPLOOPW) {
         int term = s->nhist >= 4 ? !s->hist[(s->nhist - 4) & 3] : 0;   /* exit when FALSE (7.10.2) */
         if (term) {
-            memset(s->valid, 0, sizeof s->valid);
+            memset(s->valid, 0, s->lc < SPLC ? s->lc + 1 : SPLC);
             if (!s->loading) sp_leave(c);
             else { c->sp_on = 0; c->c[C_TSR] &= ~SPLX; }
         }
@@ -743,20 +814,42 @@ static void sp_boundary(Core *c)
 }
 
 /* execute packet at pc; returns member count (0 = no code: ST_NEED) */
-static int fetch_ep(Core *c, u32 pc, Ins **ep, u32 *nxt)
+static inline ALWAYS int fetch_ep(Core *c, u32 pc, Ins **ep, u32 *nxt)
 {
+    u32 pc0 = pc;
     Ins *i = find(c, pc);
     if (i && i->header) { pc += 4; i = find(c, pc); }
     if (!i) { c->need = pc; c->status = ST_NEED; return 0; }
+    int32_t *slot = &c->epi[i - c->ins];
+    c->lastf = *slot;
+    if (*slot >= 0) {                          /* cached packet */
+        struct EPC *e = &c->epc[*slot];
+        for (int k = 0; k < e->n; k++) ep[k] = &c->ins[e->idx[k]];
+        *nxt = e->nxt;
+        return e->n;
+    }
     int n = 0; ep[n++] = i;
     u32 a = pc;
     for (;;) {
         u32 nx = next_addr(c, a);
         Ins *j = find(c, nx);
-        if (!j || !j->par || j->header || n == 16) { *nxt = nx; return n; }
+        if (!j || !j->par || j->header || n == 16) { *nxt = nx; break; }
         ep[n++] = j;
         a = nx;
     }
+    /* cache it only when the packet's end is decided by known code: a
+     * missing next word may be undecoded code that later joins it */
+    if (find(c, *nxt)) {
+        if (c->nepc == c->capepc) {
+            c->capepc = c->capepc ? c->capepc * 2 : 16384;
+            c->epc = realloc(c->epc, sizeof(struct EPC) * c->capepc);
+        }
+        struct EPC *e = &c->epc[c->nepc];
+        e->n = n; e->nxt = *nxt; e->pc = pc0; e->succ = -1;
+        for (int k = 0; k < n; k++) e->idx[k] = (int32_t)(ep[k] - c->ins);
+        *slot = c->lastf = c->nepc++;
+    }
+    return n;
 }
 
 static int sp_cycle(Core *c, u64 cyc)
@@ -880,9 +973,23 @@ static int step(Core *c)
             c->idle_armed = quiet;
             c->idle_dirty = 0;
         }
-        Ins *ep[16]; u32 nxt;
-        int n = fetch_ep(c, c->pc, ep, &nxt);
-        if (!n) return -1;
+        Ins *ep[16]; u32 nxt; int n;
+        int hi = c->hint;
+        if (hi >= 0 && c->epc[hi].pc == c->pc) {      /* the expected packet */
+            struct EPC *e = &c->epc[hi];
+            n = e->n; nxt = e->nxt;
+            for (int k = 0; k < n; k++) ep[k] = &c->ins[e->idx[k]];
+            c->prevep = hi;
+            c->hint = e->succ;
+        } else {
+            n = fetch_ep(c, c->pc, ep, &nxt);
+            if (!n) return -1;
+            int f = c->lastf, pv = c->prevep;
+            if (f >= 0 && pv >= 0 && c->epc[pv].nxt == c->pc)
+                c->epc[pv].succ = f;               /* learn the fall-through */
+            c->prevep = f;
+            c->hint = f >= 0 ? c->epc[f].succ : -1;
+        }
         c->ep_count++;
         int nop = 1;
         if (ep[0]->op == O_sploop && (c->c[C_TSR] & SPLX)) n = 1;   /* §7.13.2 */
@@ -917,6 +1024,46 @@ s64 c6x_run(Core *c, s64 n)
     c->status = ST_OK;
     s64 k = 0;
     while (k < n) {
+        /* multi-cycle NOP / load-delay stall with nothing in flight that
+         * lands meanwhile: those cycles only count down (no interrupt is
+         * taken while stalled, no event commits, no branch lands) -- jump */
+        if (c->stall > 1 && !c->evcount && !c->sp_on && !c->splx_irq) {
+            s64 j = c->stall - 1;               /* leave the last one to step() */
+            if (j > n - k) j = n - k;
+            for (int q = 0; q < c->npend; q++) {
+                s64 d = (s64)(c->pend_cyc[q] - c->cycle);
+                if (d < j) j = d;               /* a branch lands at cycle+d */
+            }
+            if (j > 0) {
+                c->stall -= (int)j;
+                c->cycle += (u64)j;
+                k += j;
+                continue;
+            }
+        }
+        if (c->stall && !c->sp_on && !c->splx_irq) {
+            /* a stall cycle: exactly step()'s path for it (no interrupt
+             * while stalled, no fetch) without the rest of its checks */
+            u64 cyc = c->cycle;
+            c->stall--;
+            commit(c, cyc);
+            for (int q = 0; q < c->npend; q++)
+                if (c->pend_cyc[q] == cyc) {
+                    c->pc = c->pend_tgt[q];
+                    c->npend--;
+                    c->pend_cyc[q] = c->pend_cyc[c->npend];
+                    c->pend_tgt[q] = c->pend_tgt[c->npend];
+                    c->stall = 0;
+                    break;
+                }
+            c->cycle = cyc + 1;
+            if (c->status) {
+                if (c->status == ST_STOP) k++;
+                break;
+            }
+            k++;
+            continue;
+        }
         if (step(c) < 0) {
             if (c->status == ST_STOP) k++;      /* that cycle completed */
             break;

@@ -503,7 +503,27 @@ static int opus_open(vslot *s)
 static vslot *probe(void *fp)
 {
     vslot *s = find(fp);
-    if (s || is_neg(fp)) return s;
+    if (s) {
+        /* 2026-10-21: a handle can be freed WITHOUT vf_close (a reader
+         * that closes through the stock path) and its address reused by
+         * an ordinary file; the raw-pointer match would then serve the
+         * old FLAC's virtual WAV for every read of the new file. Re-check
+         * the magic before trusting a slot (same tell/seek/read/seek-back
+         * the first-touch probe below does; restores the position). */
+        int pos = ((ftell_t)o_tell)(fp);
+        u8 m[4] = {0};
+        ((fseek_t)o_seek)(fp, 0, 0);
+        int got = ((fread_t)o_fread)(m, 1, 4, fp);
+        ((fseek_t)o_seek)(fp, pos, 0);
+        if (got != 4 || memcmp(m, s->kind == 1 ? "fLaC" : "OggS", 4)) {
+            memset(s, 0, offsetof(vslot, cache));
+            neg[negi++ % NNEG] = fp;
+            vf_stats[5]++;            /* stale-slot recoveries */
+            return 0;
+        }
+        return s;
+    }
+    if (is_neg(fp)) return 0;
     vf_stats[0]++;
     int pos = ((ftell_t)o_tell)(fp);
     u8 m[4] = {0};

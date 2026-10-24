@@ -15,7 +15,9 @@
  * Data (see CLAUDE.md §65): beat grid = ANLZ ctx [0x09826BE4] + 0xD7C
  * ("PQTZ", count @+0x14, ptr @+0x18; LE {u16 beat-in-bar, u16 bpm*100,
  * u32 ms}), snapshotted when the loaded track changes (browsing reuses
- * the ctx); position = [0x09D246E0] in 1/75 s.
+ * the ctx); position = [0x0C0E6D1C] (POSL, 150 Hz -- the time digits'
+ * own source, live on a real deck; the old 0x09D246E0 word freezes
+ * on hardware: CLAUDE.md sec. 103/104).
  *
  * Layer writes go through the uncached P2 alias (the 2DG engine reads RAM).
  */
@@ -32,7 +34,14 @@ typedef unsigned int u32;
 #define CTX_TAB    0x09826BE4u
 #define PQTZ_OFF   0xD7Cu
 #define TAG_PQTZ   0x5A545150u   /* "PQTZ" as stored */
-#define SH_POS     0x09D246E0u   /* 75 Hz */
+/* position: POSL (150/s) is what the time digits show -- derived from the
+ * DSP stream copy and LIVE on a real deck. The word we used first,
+ * [0x09D246E0] (75 Hz), freezes at the load position on real silicon
+ * (CLAUDE.md sec. 103/104: healthy real-DSP play, clock still moving), so
+ * the meter's beats never scrolled on hardware. POSL @0x0C0E6D1C = 2x that
+ * word's units and keeps moving both in the HLE emulator (driven via it)
+ * and with the real DSP program. */
+#define POSL       0x0C0E6D1Cu   /* 150 Hz */
 #define PREVIEW    0x0BA3BCCCu   /* loaded track's overview (changes on load) */
 #ifndef MSOFF
 #define MSOFF      0x081DBDF1u   /* MY SETTINGS: 1 = MODS OFF */
@@ -132,7 +141,7 @@ void pm_draw(u16 *lay, int stride)
 {
     /* the row lines (full width), dim when the row has no data */
     int i = -1, frac = 0;
-    u32 ms = R32(SH_POS) * 40u / 3u;          /* 1/75 s -> ms */
+    u32 ms = R32(POSL) * 20u / 3u;              /* 1/150 s -> ms */
     if (pm_n) i = beat_at(ms, &frac);
     for (int y = TOPY; y <= BOTY; y++)
         for (int x = X0 - 2; x <= X1 + 2; x++) put(lay, stride, x, y, 0);

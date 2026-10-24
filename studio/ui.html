@@ -327,7 +327,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       </div>
       <div class="pick" id="pk-pads">
         <input type="checkbox" id="pk-pads-on" checked>
-        <div class="body"><b>PERFORM Pads</b><div class="d">BEAT JUMP, KEY SHIFT and STEMS tabs on the PERFORM screen, plus 8 hot cues: swipe left or right along the HOT CUE tab to page A–C / D–F / G–H (a tap only switches tabs).</div></div>
+        <div class="body"><b>PERFORM Pads</b><div class="d">BEAT JUMP, KEY SHIFT and STEMS tabs on the PERFORM screen, plus 8 hot cues: swipe along the HOT CUE tab (or tap it in the PERFORM screen) to page A–C / D–F / G–H.</div></div>
       </div>
       <div class="pick" id="pk-liveks">
         <input type="checkbox" id="pk-liveks-on">
@@ -340,6 +340,10 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div class="pick" id="pk-themes">
         <input type="checkbox" id="pk-themes-on" checked>
         <div class="body"><b>Theme Switching</b><div class="d">MY SETTINGS › [THEME] steps through all your saved themes on the deck, live. OFF puts the stock colours back exactly.</div></div>
+      </div>
+      <div class="pick" id="pk-flac">
+        <input type="checkbox" id="pk-flac-on" checked>
+        <div class="body"><b>FLAC &amp; Opus Playback</b><div class="d">FLAC and Opus files list and play like WAV. This is the slowest part of the install (about 10 of the 15–20 minutes) — untick it now and install it later if you're in a hurry.</div></div>
       </div>
       <div class="small faint" style="margin-top:12px">Everything runs in the deck's memory — power-cycle the deck and it's stock again. Nothing here can brick it.</div>
     </div>
@@ -361,7 +365,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
         <dl class="kv small" style="margin:0">
           <dt>Safe?</dt><dd>Nothing is flashed: mods load into the deck's memory (power-cycle = stock), every write is verified and it stops at the first surprise. Track Builder does write to your USB stick, keeping backups; the Permanent (UPD) tab is the one exception that makes a file to flash.</dd>
           <dt>Undo</dt><dd>Power-cycle the deck. That's it.</dd>
-          <dt>After install</dt><dd>Waveforms in your style · BROWSE &gt; MENU &gt; MY SETTINGS has the mod rows (waveform, hot cue gate, vinyl brake length 0.5×–15×).</dd>
+          <dt>After install</dt><dd>Waveforms in your style · BROWSE &gt; MENU &gt; MY SETTINGS has the mod rows (waveform, hot cue gate, vinyl brake length 0.5×–15×). If the colours or phase meter ever look gone after a settings trip: check [WAVEFORM] is not BLUE and [MODS] is ON in that same menu — those rows switch them off.</dd>
           <dt>Need tracks?</dt><dd>Build 3-band waveforms and stems in Track Builder first.</dd>
         </dl>
       </div>
@@ -528,22 +532,30 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div class="row"><input class="field" id="updpath" type="text" placeholder="~/Downloads/XDJ700.UPD" spellcheck="false" autocomplete="off"><button class="btn" id="updpick">Choose…</button></div>
     </div>
     <div class="panel stack" style="gap:10px">
-      <div><h2>2. What to bake in</h2><div class="small dim">Baked-in mods stay on the deck after power-off.</div></div>
+      <div><h2>2. What to bake in</h2><div class="small dim">Baked-in mods stay on the deck after power-off.</div>
+        <div class="row" style="margin-top:6px;flex-wrap:wrap;gap:6px"><span class="small dim" style="align-self:center">Presets:</span>
+          <button class="btn sm" id="updpre-all">Everything</button>
+          <button class="btn sm" id="updpre-pm">Phase meter only</button>
+          <button class="btn sm" id="updpre-wave">Waveform colours only</button></div></div>
       <div class="row"><span class="dim" style="width:150px">Overview waveform</span><div class="seg" id="updwave"><button data-v="blue">Blue</button><button data-v="rgb" aria-pressed="true">RGB</button><button data-v="3band">3-Band</button></div></div>
       <label class="row"><input type="checkbox" id="updpads" checked> PERFORM pads: HOT CUE / BEAT JUMP / KEY SHIFT / STEMS tabs, beat jump 1–64</label>
+      <div class="small dim">Extras: the file carries them and a small start-up routine copies them into the deck's memory every time it switches on.</div>
+      <label class="row"><input type="checkbox" class="updx" data-x="centre" checked> RGB / 3-band centre waveform</label>
+      <label class="row"><input type="checkbox" class="updx" data-x="keyshift" checked> Live key shift (KEY SHIFT tab, MASTER TEMPO on)</label>
+      <label class="row"><input type="checkbox" class="updx" data-x="stems" data-pads="1" checked> Live stems (STEMS tab)</label>
+      <label class="row"><input type="checkbox" class="updx" data-x="hotcue8" data-pads="1" checked> 8 hot cues (swipe the HOT CUE tab for D–H)</label>
+      <label class="row"><input type="checkbox" class="updx" data-x="phasemeter" checked> Phase meter</label>
       <div class="bake">
         <div><div class="bakeh ok">Baked into the file</div><ul>
           <li>Overview waveform (blue, RGB or 3-band)</li>
           <li>PERFORM tabs and beat jump pads (if ticked)</li>
           <li>MY SETTINGS rows: [MODS], [WAVEFORM], [VINYL BRAKE] (always)</li>
+          <li>The extras you ticked above (live stems and 8 hot cues need the PERFORM pads)</li>
           <li>Version 1.16 in UTILITY, so you can tell it apart</li></ul></div>
         <div><div class="bakeh">Can't be baked: install over USB from Mods</div><ul>
-          <li>RGB / 3-band centre waveform (the file keeps the stock blue centre)</li>
-          <li>Live key shift (the KEY SHIFT tab needs it)</li>
-          <li>Live stems (the STEMS tab needs it)</li>
           <li>Live themes ([THEME] in MY SETTINGS needs it)</li>
-          <li>8 hot cues, phase meter, FLAC &amp; Opus</li></ul>
-          <div class="small faint">These live outside the space the firmware file has room for.</div></div>
+          <li>FLAC &amp; Opus playback</li></ul>
+          <div class="small faint">Each is bigger than the free space left in the firmware file (themes need about 42 KB even for one theme, FLAC &amp; Opus about 120 KB; the file has about 27 KB free).</div></div>
       </div>
     </div>
     <div class="panel stack" style="gap:8px">
@@ -732,6 +744,33 @@ function updReady() {
 }
 $$('#updwave button').forEach(b => b.onclick = () => { UPD.wave = b.dataset.v; segSet('updwave', UPD.wave); });
 $$('.updack').forEach(c => c.onchange = updReady);
+function updPads() {             /* stems + 8 hot cues live on the PERFORM pads */
+  const pads = $('#updpads').checked;
+  $$('.updx[data-pads]').forEach(c => { c.disabled = !pads; if (!pads) c.checked = false; });
+}
+$('#updpads').onchange = updPads;
+function updPreset(which) {          /* one click instead of six unticks */
+  const set = (id, v) => { const c = $('#' + id); if (c) c.checked = v; };
+  if (which === 'all') {
+    set('updpads', true);
+    $$('.updx').forEach(c => c.checked = true);
+    UPD.wave = 'rgb';
+  } else if (which === 'pm') {       /* "just the phase meter" */
+    set('updpads', false);
+    $$('.updx').forEach(c => c.checked = c.dataset.x === 'phasemeter');
+    UPD.wave = 'blue';               /* stock overview */
+  } else {                           /* waveform colours only */
+    set('updpads', false);
+    $$('.updx').forEach(c => c.checked = false);
+    UPD.wave = 'rgb';
+  }
+  segSet('updwave', UPD.wave);
+  updPads(); updReady();
+}
+$('#updpre-all').onclick = () => updPreset('all');
+$('#updpre-pm').onclick = () => updPreset('pm');
+$('#updpre-wave').onclick = () => updPreset('wave');
+$$('.updx').forEach(c => c.onchange = updReady);
 $('#updpath').oninput = updReady;
 $('#updpick').onclick = async () => {
   const p = await pickFile('Choose the OFFICIAL XDJ-700 v1.15 update file (XDJ700.UPD)');
@@ -744,7 +783,8 @@ $('#updbtn').onclick = async () => {
   if (!ok) return;
   const ack = {}; $$('.updack').forEach(c => ack[c.dataset.k] = c.checked);
   const r = await api('/api/upd/build', {path: $('#updpath').value.trim(), mode: UPD.wave,
-    pads: $('#updpads').checked, versions: false, ack});
+    pads: $('#updpads').checked, versions: false, ack,
+    extras: $$('.updx').filter(c => c.checked && !c.disabled).map(c => c.dataset.x)});
   if (r) { toast('Building + boot-testing — about 5 minutes.'); watch(); }
 };
 
@@ -766,6 +806,7 @@ function renderPick() {
   if ($('#pk-themes-on').checked) parts.push('Theme switching');
   if ($('#pk-liveks-on').checked) parts.push('Live key shift');
   if ($('#pk-phase-on').checked) parts.push('Phase meter');
+  if ($('#pk-flac-on').checked) parts.push('FLAC & Opus');
   $('#modsum').innerHTML = parts.map(p => `<span>${esc(p)}</span>`).join('') || '<span>nothing selected</span>';
 }
 $$('#p-mods .pick input[type=checkbox]').forEach(cb => cb.onchange = () => { PICK.touched = true; renderPick(); });
@@ -781,16 +822,18 @@ $('#deckgo').onclick = async () => {
   const wave = PICK.wave === 'custom' ? 'blue' : PICK.wave;
   const pads = $('#pk-pads-on').checked;
   const themes = $('#pk-themes-on').checked, liveks = $('#pk-liveks-on').checked, phase = $('#pk-phase-on').checked && pads;
+  const flac = $('#pk-flac-on').checked;
   const parts = [`waveform ${wave.toUpperCase()}`];
   if (pads) parts.push('PERFORM pads');
   if (themes) parts.push('theme switching');
   if (liveks) parts.push('live key shift');
   if (phase) parts.push('phase meter');
+  if (flac) parts.push('FLAC & Opus playback');
   // same session plan as the server (studio/app.py INSTALL_STEPS, ~50 s each)
-  const mins = Math.round(((ST.surveyed ? 1 : 5) + 3 + 1 + 1 + 1 + 1 + (pads ? 2 : 0) + (themes ? 4 : 0) + (liveks ? 2 : 0) + (phase ? 3 : 0)) * 55 / 60);
+  const mins = Math.round(((ST.surveyed ? 1 : 5) + 3 + 1 + 1 + 1 + 1 + (pads ? 2 : 0) + (themes ? 4 : 0) + (liveks ? 2 : 0) + (phase ? 3 : 0) + (flac ? 10 : 0)) * 55 / 60);
   if (await ask('Install mods on the deck?',
     `${parts.join(' · ')}. It takes about ${mins} minutes, plus the moment you eject the stick when asked. Keep the USB stick out of the deck until the log asks for it. Power-cycle the deck any time to go back to stock.`, 'Install'))
-    api('/api/deck/install', {mode: wave, pads, themes, liveks, phase}).then(r => r && watch());
+    api('/api/deck/install', {mode: wave, pads, themes, liveks, phase, flac}).then(r => r && watch());
 };
 
 /* ---- Theme Builder */
