@@ -1412,12 +1412,13 @@ def j_upd_build(log, prog, upd, mode, pads, versions, banner, extras=()):
     prog(1.0, "Built + boot-tested. Read the warnings before flashing.")
 
 
-UPD_EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift")
+UPD_EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift", "utility")
 UPD_EXTRA_NAMES = {"centre": "coloured centre waveform",
                    "phasemeter": "phase meter",
                    "hotcue8": "8 hot cues (HOT CUE tab paging)",
                    "stems": "live stems (STEMS tab)",
-                   "keyshift": "live key shift (KEY SHIFT tab, MASTER TEMPO on)"}
+                   "keyshift": "live key shift (KEY SHIFT tab, MASTER TEMPO on)",
+                   "utility": "mod settings in UTILITY (hold MENU)"}
 
 UPD_README = """XDJ-700 MODDED UPDATE FILE (firmware {banner}) -- READ BEFORE FLASHING
 

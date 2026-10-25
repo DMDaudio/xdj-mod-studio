@@ -59,10 +59,10 @@ MSTAPP = MS + 0x7F5                # u8 1 = theme applied this boot
 MSTNAME = MS + 0x800               # 16-B ASCII theme name (theme installer)
 MSGATE = MS + 0x7F8                 # u8 hot-cue gate (0 off, 1 gate)
 MSBRAKE = MS + 0x7F9                # u8 vinyl brake length index (0 = 1x)
-# 2026-10-25: [THEME] is only shown when theme switching is installed
-# (MSTNAME[0] != 0). Without it the row was a dead "-" that pushed
-# [HOT CUE] off the 7-row popup on a linked deck (tester: "one player has
-# the Hot Cue Gate row, the other doesn't"). MSKB = first kind shown.
+# 2026-10-25: on a linked deck (no room for all five rows) [THEME] is the
+# one left out, not [HOT CUE] (tester: "one player has the Hot Cue Gate
+# row, the other doesn't"); otherwise all five rows, as before.
+# UTILITY (tools/utility.py) always has every row. MSKB = first kind shown.
 MSKB = MS + 0x7FA                   # u8 0 = [THEME] shown, 1 = hidden
 # [VINYL BRAKE] (2026-10-18): brake length = K / ..., K = the one literal
 # at 0x08D3714C (tools/brake_length_apply.py, CLAUDE.md §120)
@@ -133,13 +133,10 @@ mappend:                    ; = show fn of the main MY SETTINGS list
   bt apdone
   mov #7,r0                 ; room = 7 - n (popup holds 7)
   sub r8,r0
-  mov.l @({MSTNAME:#x},pc),r1
-  mov.b @r1,r1
-  tst r1,r1                 ; no theme switching installed -> skip [THEME]
-  movt r2                   ; r2 = first kind (0 or 1)
+  mov #0,r2                 ; r2 = first kind shown: all five rows ...
   mov #{NROWS},r1
-  cmp/hs r1,r0              ; no room for all rows (linked deck: stock
-  bt apk                    ; [BACKGROUND COLOR]) -> skip [THEME] too, so
+  cmp/hs r1,r0              ; ... unless there's no room (linked deck: stock
+  bt apk                    ; [BACKGROUND COLOR]) -> skip [THEME], so
   mov #1,r2                 ; [HOT CUE] + [VINYL BRAKE] stay reachable
 apk:
   mov.l @({MSKB:#x},pc),r1
@@ -671,13 +668,9 @@ def emu():
     ok &= mem.r8(RO.MODE_ADDR) == mode1
     print("rows:", rows())
     fb_png(m, f"{out}/c_final.png")
-    if mem.r8(MSKB):                        # no theme switching here:
-        print("rows:", rows())              # [THEME] hidden, HOT CUE shown
-        ok &= not row_text(0) and row_text(1).startswith("[MODS]")
-    else:
-        goto(0)
-        print("rows:", rows())
-        ok &= row_text(0).startswith("[THEME]")
+    goto(0)                                 # unlinked: all five rows
+    print("rows:", rows())
+    ok &= mem.r8(MSKB) == 0 and row_text(0).startswith("[THEME]")
     goto(4)
     key("RotaryPush")                       # HOT CUE -> GATE
     print(f"HOT CUE push: gate={mem.r8(MSGATE)}")

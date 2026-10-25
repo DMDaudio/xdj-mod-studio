@@ -167,7 +167,7 @@ class SplitMem(ImgMem):
 # >= 42 KB compressed even for ONE theme) and FLAC/Opus (vfile.bin: ~120 KB
 # compressed) are each bigger than all the room left in the flash slot
 # (~27 KB after the in-image mods): those stay USB-only.
-EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift")
+EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift", "utility")
 FLUSH_POOL = 0x08C92E20                 # display flush (pads / pm / hc chain)
 ENTRY_POOL, ENTRY_STUB = 0x080009E0, 0x08CB8714   # startup's empty init hook
 TAIL_ALIGN = 32
@@ -321,9 +321,34 @@ def bake_keyshift(mem, log):
         f"loaded by the deck's own DSP boot)")
 
 
+# UTILITY rows (tools/utility, CLAUDE.md sec. 127): the stock UTILITY table
+# is .data -- image 0x08E634B4 (16 x 52 B), copied by startup to RAM
+# 0x0E736410, count word image 0x08E637F4 -> RAM 0x0E736750. The module
+# (boot-copied to its RAM home) carries a copy of the 16 image records +
+# our 5; the four table pools (code) point at it and the image's count
+# word says 21, so the .data copy brings the right count up with the deck.
+UT_IMG_TAB, UT_IMG_COUNT = 0x08E634B4, 0x08E637F4
+
+
+def bake_utility(mem, log):
+    import utility as U
+    assert U.STOCK_TAB - UT_IMG_TAB == U.COUNT - UT_IMG_COUNT == 0x058D2F5C
+    stock = bytes(mem.r8(UT_IMG_TAB + i) for i in range(U.STOCK_N * U.REC))
+    assert struct.unpack_from("<I", stock)[0] == 0xA80D486C, "UTILITY table moved"
+    assert mem.r32(UT_IMG_COUNT) == U.STOCK_N
+    base, img, s = U.image(stock)
+    mem.region(base, (s["end"] + 3) & ~3, "UTILITY rows")
+    mem.write(base, img)
+    for p in U.POOLS:
+        assert mem.r32(p) == U.STOCK_TAB, hex(p)
+        mem.w32(p, s["ut_tab"])
+    mem.w32(UT_IMG_COUNT, U.STOCK_N + U.NOURS)
+    log(f"UTILITY rows ({base:#x}; table pools + count 16 -> 21 in the image)")
+
+
 BAKERS = {"centre": bake_centre, "phasemeter": bake_phasemeter,
           "hotcue8": bake_hotcue8, "stems": bake_stems,
-          "keyshift": bake_keyshift}
+          "keyshift": bake_keyshift, "utility": bake_utility}
 
 
 COPIER_SRC = """
@@ -510,10 +535,11 @@ def build(stock, out, mode="rgb", banner="1.16", versions=True,
 
 EXTRA_HOMES = {"centre": 0x098A0000, "hotcue8": 0x09790000,
                "phasemeter": 0x09798000, "stems": 0x09836000,
-               "keyshift": KS_COPY}
+               "keyshift": KS_COPY, "utility": 0x09794000}
 EXTRA_SYMS = {"centre": "build/centre/cw.syms", "hotcue8": "build/hotcue8/hc.syms",
               "phasemeter": "build/phasemeter/pm.syms",
-              "stems": "build/stems/sm.syms", "keyshift": "build/keyshift/ks.syms"}
+              "stems": "build/stems/sm.syms", "keyshift": "build/keyshift/ks.syms",
+              "utility": "build/utility/ut.syms"}
 
 
 def baked_jobs(dec):
@@ -570,6 +596,12 @@ def extras_checks(m, dec, jobs, extras, log):
                  ([PP.hooks()[1][2]] if pads_baked else [PP.ORIG_BLIT])
     out.append(("flush hook chain (8 hot cues / phase meter / PERFORM pads)",
                 chain == want_chain))
+    if "utility" in extras:
+        import utility as U
+        t = extras["utility"]["ut_tab"]
+        out.append(("UTILITY table pools + count 21",
+                    all(m.mem.r32(p) == t for p in U.POOLS)
+                    and m.mem.r32(U.COUNT) == U.STOCK_N + U.NOURS))
     if "stems" in extras:
         out.append(("stems read hook", m.mem.r32(0x08D5FFA8) == extras["stems"]["sm_fread"]))
     if "keyshift" in extras:
@@ -639,6 +671,26 @@ def emu_check(upd, steps=6_000_000_000, log=print):
     drawn = int((a > 40).sum())
     log(f"  {'ok  ' if drawn > 20000 else 'FAIL'} main screen drawn ({drawn:,} lit px)")
     ok &= drawn > 20000
+    if "utility" in extras:
+        # hold MENU = UTILITY, scroll to the end: our rows get drawn
+        ut = extras["utility"]
+        m.mem.dev.panel_frame = panl.build_frame(keys=["MenuUtility"])
+        m.cpu.run(limit=200_000_000)
+        m.mem.dev.panel_frame = panl.build_frame()
+        m.cpu.run(limit=60_000_000)
+        for _ in range(20):
+            m.mem.w16(panl.ROTARY_COUNTER, (m.mem.r16(panl.ROTARY_COUNTER) + 1) & 0xFFFF)
+            m.cpu.run(limit=8_000_000)
+        m.cpu.run(limit=20_000_000)
+        fb_png(m, os.path.join(shots, "utility.png"))
+        drew = m.mem.r32(ut["ut_draws"]) > 0
+        log(f"  {'ok  ' if drew else 'FAIL'} UTILITY shows the mod rows "
+            f"({m.mem.r32(ut['ut_draws'])} draws)")
+        ok &= drew
+        m.mem.dev.panel_frame = panl.build_frame(keys=["MenuUtility"])   # close
+        m.cpu.run(limit=12_000_000)
+        m.mem.dev.panel_frame = panl.build_frame()
+        m.cpu.run(limit=60_000_000)
     # PERFORM smoke on the baked pads (no track needed): open by touch,
     # every tab, one jump-pad tap; nothing may fault
     import perform_pads as PP

@@ -545,6 +545,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <label class="row"><input type="checkbox" class="updx" data-x="stems" data-pads="1" checked> Live stems (STEMS tab)</label>
       <label class="row"><input type="checkbox" class="updx" data-x="hotcue8" data-pads="1" checked> 8 hot cues (swipe the HOT CUE tab for D–H)</label>
       <label class="row"><input type="checkbox" class="updx" data-x="phasemeter" checked> Phase meter</label>
+      <label class="row"><input type="checkbox" class="updx" data-x="utility" checked> Mod settings in UTILITY (hold MENU; MY SETTINGS rows are always in)</label>
       <div class="bake">
         <div><div class="bakeh ok">Baked into the file</div><ul>
           <li>Overview waveform (blue, RGB or 3-band)</li>
@@ -757,11 +758,11 @@ function updPreset(which) {          /* one click instead of six unticks */
     UPD.wave = 'rgb';
   } else if (which === 'pm') {       /* "just the phase meter" */
     set('updpads', false);
-    $$('.updx').forEach(c => c.checked = c.dataset.x === 'phasemeter');
+    $$('.updx').forEach(c => c.checked = c.dataset.x === 'phasemeter' || c.dataset.x === 'utility');
     UPD.wave = 'blue';               /* stock overview */
   } else {                           /* waveform colours only */
     set('updpads', false);
-    $$('.updx').forEach(c => c.checked = false);
+    $$('.updx').forEach(c => c.checked = c.dataset.x === 'utility');
     UPD.wave = 'rgb';
   }
   segSet('updwave', UPD.wave);

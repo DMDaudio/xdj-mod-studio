@@ -19,10 +19,11 @@ the Windows zip). First launch: right-click the app → Open.
   UTILITY scrolls, so every row is there on every deck — the MY SETTINGS
   popup only holds 7 rows, and with Pro DJ Link the deck adds its own
   [BACKGROUND COLOR] row there, which is why the Hot Cue Gate row went
-  missing on a linked player. The MY SETTINGS rows stay too (on a linked
-  deck they now leave out [THEME] instead of [HOT CUE]); both menus change
-  the same settings. (A permanent UPD file still carries only the MY
-  SETTINGS rows; the UTILITY rows come with the USB install.)
+  missing on a linked player. The MY SETTINGS rows stay exactly as before
+  (only on a linked deck, where the popup can't fit them all, it now
+  leaves out [THEME] instead of [HOT CUE]); both menus change the same
+  settings. The Permanent (UPD) tab can bake the UTILITY rows in too
+  (tick box "Mod settings in UTILITY", on by default and in the presets).
 - **BEAT JUMP pads let go properly.** After a tap the deck's touch handler
   sometimes stopped before our pad released its button signal, so the
   jump "button" stayed held until the next touch (found in the emulator).

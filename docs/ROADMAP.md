@@ -36,7 +36,9 @@ whenever they're needed.
 
 - v0.9.7 (2026-10-24): hotfix -- deck install crashed at job() (flac
   keyword).
-- v0.9.8 (2026-10-25, salvofly's Windows list): phase meter also on the
+- v0.9.8 (2026-10-25, salvofly's Windows list; RELEASED): mod rows in the
+  stock UTILITY list (tools/utility, step 5u; scrolls, so nothing drops on
+  linked decks; not baked into permanent UPDs yet); phase meter also on the
   PERFORM screen (pm.c pm_dy -103, phasemeter_test PERFORM leg); MY
   SETTINGS hides [THEME] when theme switching isn't installed OR the popup
   is short (linked deck) so [HOT CUE] gate + [VINYL BRAKE] stay (MSKB);
@@ -157,6 +159,10 @@ whenever they're needed.
   phase meter via the boot copier (built + emulator-tested, private:
   tools/permanent_build.py, tools/permanent_extras_emu.py).
 - PREREQ: one real flash of a basic permanent file going fine.
+
+## Next: emulator speed (own branch, user-agreed 2026-10-25)
+- Hot-loop shortcuts first (bulk copy/fill, HPI polling: ~1.5-2x), then
+  an SH-4 recompiler, each step bit-checked against the interpreter.
 
 ## 1.0
 - Everything on the list proven on a deck, installed from the downloaded app.
