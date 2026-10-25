@@ -95,6 +95,27 @@ typedef struct {
     uint64_t tdg_dirty_ssr;
     uint32_t tdg_py;            /* route ALL 2DG traffic to Python (rare) */
     uint32_t tdg_pad;
+    /* --- appended fields (fastcpu.py Core mirrors this layout) ---
+     * CS6/DSP co-simulation accelerator (XDJ_DSP_CS6C, 2026-10-24): the
+     * firmware's HPI traffic during play is ~220k crossings per emulated
+     * second (HPIA store + HPID load poll loops, the PCM pump) and each
+     * one was a Python round trip + a DSP time-lock sync. With cs6_fast,
+     * HPIA is served from this core's own mirror and HPID reads are
+     * served straight out of the DSP's RAM regions (registered read-only
+     * by fastcpu.py from dspemu.bus.ram -- the same bytearrays the C6x
+     * core executes over, so the host sees the DSP's memory as it is,
+     * at most one slice stale in DSP time). HPID/HPIC writes still cross
+     * (fastcpu syncs dspdev.hpia from the mirror first; the mirror is
+     * the single owner of HPIA while this core runs). */
+    uint32_t cs6_fast;
+    uint32_t dsp_region_n;
+    struct { uint32_t base, len; uint8_t *ptr; } dsp_region[8];
+    /* core_run hot-loop commit state (2026-10-24): cur_pc updated every
+     * instruction (exact fault pc), run_commit every COMMIT iterations
+     * (fault-path iteration reconstruction). */
+    uint32_t cur_pc;
+    uint32_t cur_pad;
+    uint64_t run_commit;
 } Core;
 
 /* ------------------------------------------------------------------ */
@@ -244,7 +265,12 @@ static void tdg_wr8(Core *c, uint32_t a, uint32_t v)
 /* ------------------------------------------------------------------ */
 static uint32_t cs6_rd8(Core *c, uint32_t a)
 {
-    if (c->cs6_py) return c->io_rd(a) & 0xFFu;
+    if (c->cs6_py) {
+        uint32_t off = a - CS6BASE;
+        if (c->cs6_fast && off - 0x40000u < 4u)      /* HPIA: pure mirror */
+            return (c->cs6_addr >> ((off - 0x40000u) * 8u)) & 0xFFu;
+        return c->io_rd(a) & 0xFFu;
+    }
     uint32_t off = a - CS6BASE;
     if (off < 4u)
         return (c->cs6_ctrl >> (off * 8u)) & 0xFFu;
@@ -257,7 +283,16 @@ static uint32_t cs6_rd8(Core *c, uint32_t a)
 
 static void cs6_wr8(Core *c, uint32_t a, uint32_t v)
 {
-    if (c->cs6_py) { c->io_wr(a, v & 0xFFu); return; }    uint32_t off = a - CS6BASE;
+    uint32_t off = a - CS6BASE;
+    if (c->cs6_py) {
+        if (c->cs6_fast && off - 0x40000u < 4u) {    /* HPIA: pure mirror */
+            uint32_t sh = (off - 0x40000u) * 8u;
+            c->cs6_addr = (c->cs6_addr & ~(0xFFu << sh)) | ((v & 0xFFu) << sh);
+            return;
+        }
+        c->io_wr(a, v & 0xFFu);
+        return;
+    }
     if (off < 4u) {
         uint32_t sh = off * 8u;
         c->cs6_ctrl = (c->cs6_ctrl & ~(0xFFu << sh)) | ((v & 0xFFu) << sh);
@@ -332,6 +367,34 @@ static void wr8p(Core *c, uint32_t a, uint32_t v)
 }
 
 /* n in {1,2,4}; p physical. Aligned accesses never straddle a region. */
+
+/* Host HPID read served out of the DSP's own RAM (cs6_fast). b = byte
+ * offset into the port, like dspdev.read: the word at HPIA&~3 (the
+ * HPI never latches unaligned, but keep the same arithmetic), shifted
+ * by the port offset; the auto-increment port bumps HPIA when the read
+ * completes the word. Returns 1 on a region hit, 0 = cross to Python. */
+static int cs6_hpid_rd(Core *c, uint32_t dp, int n, uint32_t *out)
+{
+    int inc;
+    uint32_t b;
+    if (dp == 0x80000u) inc = 1;            /* HPID auto-increment */
+    else if (dp == 0xC0000u) inc = 0;       /* HPID fixed */
+    else return 0;
+    b = dp & 3u;
+    if (b + (uint32_t)n < 4u || n < 1) return 0;    /* partial word: cross */
+    for (uint32_t i = 0; i < c->dsp_region_n && i < 8u; i++) {
+        uint32_t a = c->cs6_addr & ~3u, base = c->dsp_region[i].base;
+        if (a - base < c->dsp_region[i].len) {
+            uint32_t w;
+            memcpy(&w, c->dsp_region[i].ptr + (a - base), 4);
+            *out = (w >> (8u * b)) & (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n));
+            if (inc) c->cs6_addr += 4u;
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static inline uint32_t prd(Core *c, uint32_t p, int n)
 {
     int fb, ro;
@@ -350,9 +413,20 @@ static inline uint32_t prd(Core *c, uint32_t p, int n)
              * attached; 2DG reads are served from the mirror. */
             int fb2, ro2;
             uint32_t dp = p - CS6BASE, tp = p - TDG_BASE;
-            if (dp < CS6SPAN && c->cs6_py && p + (uint32_t)n <= CS6BASE + CS6SPAN)
-                return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
-                              : c->io_rds(p, 2) & 0xFFFFu;
+            if (dp < CS6SPAN && c->cs6_py) {
+                if (p + (uint32_t)n > CS6BASE + CS6SPAN) {
+                    /* straddles the CS6 window end: fall back to bytes */
+                } else if (c->cs6_fast && dp - 0x40000u < 4u) {
+                    return (c->cs6_addr >> (8u * (dp - 0x40000u))) &
+                           (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n));
+                } else {
+                    uint32_t v;
+                    if (c->cs6_fast && cs6_hpid_rd(c, dp, n, &v))
+                        return v;
+                    return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
+                                  : c->io_rds(p, 2) & 0xFFFFu;
+                }
+            }
             if (!loc(c, p + (uint32_t)n - 1u, &fb2, &ro2) &&
                 (dp >= CS6SPAN || p + (uint32_t)n <= CS6BASE + CS6SPAN))
                 return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
@@ -986,38 +1060,56 @@ static void step(Core *c, uint32_t op, uint32_t nxt, Res *res)
  * --------------------------------------------------------------------- */
 int core_run(Core *c, uint64_t max_iter, uint64_t *done)
 {
-    volatile uint64_t it = 0;
-    volatile uint32_t ipc = 0;
+    /* Hot-loop bookkeeping lives in locals, committed to the Core every
+     * COMMIT iterations and at every exit: the old `volatile` counters
+     * cost a load+add+store per instruction (2026-10-24). cur_pc is the
+     * one thing committed EVERY iteration -- a fault (longjmp below) must
+     * land on the exact faulting pc. After longjmp the locals are
+     * indeterminate (registers rewound), so the fault path reconstructs
+     * from the last commit: *done trails the true count by < COMMIT,
+     * deterministic for a given instruction stream (same boundaries on
+     * both sides of any A/B) and bounded by COMMIT cycles of tick time.
+     * The intervening steps/cycles are under-counted, never over. */
+    enum { COMMIT = 64 };
+    uint64_t it = 0, steps = 0, cycles = 0;
     int reason = R_LIMIT;
     c->io_break = 0;
     g_fallback = 0;
+    c->run_commit = 0;
     if (c->mmucr & 1) { *done = 0; return R_FALLBACK; }
 
     if (setjmp(g_jb)) {
-        /* a precise fault from the instruction at ipc (or its slot) */
-        enter_exc(c, x_off, x_code, ipc, x_hastea, x_tea);
-        it++;
-        if (c->io_break || (c->mmucr & 1)) { *done = it; return R_IO; }
+        /* a precise fault from the instruction at cur_pc (or its slot).
+         * Return after ONE reconstructed iteration: the locals are
+         * indeterminate after longjmp, so the loop cannot resume here
+         * without losing its place; Python re-enters core_run for the
+         * rest of the slice (faults are rare -- a storm just costs one
+         * Python round trip per instruction). */
+        enter_exc(c, x_off, x_code, c->cur_pc, x_hastea, x_tea);
+        c->steps += 1;
+        c->cycles += 1;
+        *done = 1;
+        return R_IO;
     }
     while (it < max_iter) {
         uint32_t pc = c->pc;
         if (!c->low_is_ram && pc == 0xA8000800u) c->low_is_ram = 1;
         if (c->idle_skip && (pc & 0x1FFFFFFFu) == c->idle_pc) { reason = R_IDLE; break; }
-        ipc = pc;
+        c->cur_pc = pc;
         uint32_t op = RD16(pc);
         uint32_t nxt = pc + 2;
         Res r;
         step(c, op, nxt, &r);
         if (g_fallback) { c->pc = pc; reason = R_FALLBACK; break; }
-        c->steps++;
+        steps++;
         switch (r.kind) {
-        case K_NONE: c->pc = nxt; c->cycles += 1; break;
-        case K_TIMED: c->pc = nxt; c->cycles += r.cyc; break;
-        case K_BR: c->pc = r.tgt; c->cycles += r.cyc; break;
-        case K_EXC: c->cycles += r.cyc; break;
-        case K_ADV4: c->pc = pc + 4; c->cycles += r.cyc; break;
+        case K_NONE: c->pc = nxt; cycles += 1; break;
+        case K_TIMED: c->pc = nxt; cycles += r.cyc; break;
+        case K_BR: c->pc = r.tgt; cycles += r.cyc; break;
+        case K_EXC: cycles += r.cyc; break;
+        case K_ADV4: c->pc = pc + 4; cycles += r.cyc; break;
         case K_DBR: case K_RTE: {
-            c->cycles += r.cyc;
+            cycles += r.cyc;
             uint32_t dop = RD16(nxt);
             c->pc = nxt;
             Res d;
@@ -1026,7 +1118,7 @@ int core_run(Core *c, uint64_t max_iter, uint64_t *done)
             if (d.kind == K_BR || d.kind == K_DBR || d.kind == K_RTE || d.kind == K_EXC) {
                 enter_exc(c, 0x100, 0x1A0, nxt, 0, 0);
             } else {
-                c->steps++;
+                steps++;
                 if (r.kind == K_RTE) { set_sr(c, r.rssr); c->pc = r.tgt; }
                 else c->pc = r.tgt;
             }
@@ -1034,10 +1126,18 @@ int core_run(Core *c, uint64_t max_iter, uint64_t *done)
         }
         }
         it++;
+        if ((it & (COMMIT - 1u)) == 0u) {
+            c->run_commit = it;
+            c->steps += steps;
+            c->cycles += cycles;
+            steps = cycles = 0;
+        }
         if (c->sleeping) { reason = R_SLEEP; break; }
         if (c->io_break) { reason = R_IO; break; }
     }
 out:
+    c->steps += steps;
+    c->cycles += cycles;
     *done = it;
     return reason;
 }
@@ -1057,6 +1157,20 @@ uint32_t *core_hpid(Core *c, uint64_t *n)
 {
     if (n) *n = c->hpid_n;
     return c->hpid_buf;
+}
+
+/* DSP RAM regions for the cs6_fast HPID read serving (read-only views of
+ * the bytearrays the C6x core runs over; fastcpu.py keeps them alive). */
+void core_clear_dsp_regions(Core *c) { c->dsp_region_n = 0; }
+
+int core_add_dsp_region(Core *c, uint32_t base, uint32_t len, void *ptr)
+{
+    if (c->dsp_region_n >= 8) return -1;
+    c->dsp_region[c->dsp_region_n].base = base;
+    c->dsp_region[c->dsp_region_n].len = len;
+    c->dsp_region[c->dsp_region_n].ptr = (uint8_t *)ptr;
+    c->dsp_region_n++;
+    return 0;
 }
 
 int core_sizeof(void) { return (int)sizeof(Core); }

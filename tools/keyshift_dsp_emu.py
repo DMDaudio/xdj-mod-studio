@@ -109,7 +109,7 @@ def main():
         print(mode, "MT", mem.r8(0x0B6C4308), "BC4", hex(d.bus.read(0x11837BC4, 4)), flush=True)
         ks = None
         if mode == "shift":
-            ks = install_dsp(d, blob)
+            ks = None if os.environ.get("NOKS") else install_dsp(d, blob)
             mem.w16(SH_STORE, 0x0009)
             mem.w32(SH_SLOT, 0x40000000 | q20(2 ** (semis / 12)))
         play(m, 0.3)                                   # settle

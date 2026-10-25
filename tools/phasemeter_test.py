@@ -150,6 +150,36 @@ def main():
         ok &= match and d1 > d0
         print(f"POSL {posl} ({ms} ms): draws +{d1-d0}, "
               f"{'MATCH' if match else 'DIFF'} got {sorted(got_n.items())} want {sorted(want.items())}")
+    # PERFORM screen (2026-10-25 tester: the PERFORM screen showed the stock
+    # 4-beat boxes): the same meter 103 px higher, at the same POSL
+    mem.dev.panel_frame = panl.build_frame(touch=(705, 37))
+    m.cpu.run(limit=3_000_000)
+    mem.dev.panel_frame = panl.build_frame()
+    m.cpu.run(limit=10_000_000)
+    modew = mem.r32(0x0BA371D4)
+    d0 = mem.r32(s["pm_draws"])
+    m.cpu.run(limit=20_000_000)
+    d1 = mem.r32(s["pm_draws"])
+    fb_png(m, "screenshots/phasemeter_perform.png")
+    from PIL import Image
+    im = Image.open("screenshots/phasemeter_perform.png").convert("RGB")
+    got = {}
+    for x in range(X0, X1 + 1):
+        r, g_, b = im.getpixel((x, BY - 103 - 5))
+        if r > 180 and g_ < 90 and b < 90:
+            got[x] = "red"
+        elif 130 <= r <= 170 and abs(r - g_) < 12 and abs(r - b) < 12:
+            got[x] = "tick"
+    got_n = {x: v for x, v in got.items() if not (v == "red" and got.get(x + 1) == "red")}
+    want = model(g, mem.r32(POSL) * 20 // 3)
+    match = modew == 7 and got_n == want and d1 > d0
+    ok &= match
+    print(f"PERFORM (mode {modew}): draws +{d1-d0}, {'MATCH' if match else 'DIFF'} "
+          f"got {sorted(got_n.items())} want {sorted(want.items())}")
+    mem.dev.panel_frame = panl.build_frame(touch=(705, 37))   # close PERFORM
+    m.cpu.run(limit=3_000_000)
+    mem.dev.panel_frame = panl.build_frame()
+    m.cpu.run(limit=10_000_000)
     # Browse open: the list covers the meter -> must not be painted over
     mem.dev.panel_frame = panl.build_frame(keys=["Browse"])
     m.cpu.run(limit=3_000_000)

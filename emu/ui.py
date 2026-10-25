@@ -632,6 +632,12 @@ class EmuApp:
                 m.mem.w8(a, b)
         if all(m.mem.r32(p) == old for p, old, new in MSET.hooks()):
             MSET.install(m.mem)
+        try:                          # the same rows in UTILITY (hold MENU)
+            import utility as UT      # (tools/utility_apply.py, step 5c2)
+            if m.mem.r32(UT.POOLS[0]) == UT.STOCK_TAB:
+                UT.install(m.mem)
+        except Exception:
+            pass
         # PERFORM screen pads (HOT CUE / BEAT JUMP / KEY SHIFT / STEMS tabs),
         # same bytes as tools/perform_pads_apply.py (deck_session step 5d)
         import perform_pads as PP

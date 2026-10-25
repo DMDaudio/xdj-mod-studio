@@ -101,12 +101,16 @@ def main():
     kw = {x: True for x in sys.argv if x.startswith("--") and
           x not in ("--old", "--new")}
     vals = [x for x in sys.argv[1:] if not x.startswith("--")]
-    if kw.get("--old"):
+    # --old/--new are side selectors, not mode flags: kw deliberately
+    # excludes them, so read them off argv directly (2026-10-24: they were
+    # looked up in kw and never found, so --old silently ran the CURRENT
+    # build on both sides of every two-run A/B).
+    old = "--old" in sys.argv
+    if old:
         build_old() if not os.path.exists(OLD_LIB) else None
         os.environ["OLD_FASTCORE"] = "1"
     if "--write" in sys.argv:
         out = sys.argv[sys.argv.index("--write") + 1]
-        old = kw.get("--old")
         if old:
             os.environ["XDJ_FASTCORE_LIB"] = OLD_LIB
         snap = vals[0]

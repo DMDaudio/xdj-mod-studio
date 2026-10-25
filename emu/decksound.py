@@ -107,6 +107,7 @@ class DeckSound:
         self.stop = threading.Event()
         self.thread = None
         self.aq = None
+        self.out = None             # live output (AudioQueue / pygame)
         self.at = None
         self.bufs = []
         self.served = 0
@@ -236,10 +237,8 @@ class DeckSound:
                 self.status = f"sound: {type(e).__name__}: {e}"
                 time.sleep(0.5)
 
-    # -- consumer (CoreAudio callback thread) -------------------------------
-    def _callback(self, user, aq, bufref):
-        nfr = 4096
-        nbytes = nfr * 4
+    # -- consumer (platform output callback thread) -------------------------
+    def _fill(self, nfr):
         out = np.zeros((nfr, 2), np.float32)
         if self.playing and not self.muted and self.aq is not None:
             pos = self._pos()
@@ -256,49 +255,25 @@ class DeckSound:
                     out[:take] = self.ring[idx]
                     self.ring_pos += take
                     self.ring_n -= take
-        data = (np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
-        b = ctypes.cast(bufref, ctypes.POINTER(macaudio._AQB)).contents
-        ctypes.memmove(b.mAudioData, data, nbytes)
-        b.mAudioDataByteSize = nbytes
-        if self.at is not None:            # None in output-less tests
-            self.at.AudioQueueEnqueueBuffer(aq, bufref, 0, None)
         self.served += nfr
+        return (np.clip(out, -1.0, 1.0) * 32767.0).astype("<i2").tobytes()
+
+    def _callback(self, user, aq, bufref):
+        """Legacy AudioQueue-shaped entry (tests drive this with a fake
+        buffer; the live queue goes through _fill via macaudio)."""
+        data = self._fill(4096)
+        b = ctypes.cast(bufref, ctypes.POINTER(macaudio._AQB)).contents
+        ctypes.memmove(b.mAudioData, data, 4096 * 4)
+        b.mAudioDataByteSize = 4096 * 4
 
     def _open_queue(self):
-        at = macaudio._audio_toolbox()
-        macaudio._bind(at)
-        for fn in ("AudioQueueStart", "AudioQueueStop"):
-            getattr(at, fn).argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            getattr(at, fn).restype = ctypes.c_int32
-        self.at = at
-        asbd = macaudio._ASBD()
-        asbd.mSampleRate = float(SR)
-        asbd.mFormatID = 0x6C70636D                     # 'lpcm' (0x21='!' was wrong: "fmt?" 1718449215)
-        asbd.mFormatFlags = _LPCM_S16LE
-        asbd.mBytesPerPacket = 4
-        asbd.mFramesPerPacket = 1
-        asbd.mBytesPerFrame = 4
-        asbd.mChannelsPerFrame = 2
-        asbd.mBitsPerChannel = 16
-        self._cb_keepalive = macaudio._CB(self._callback)
-        q = ctypes.c_void_p()
-        r = at.AudioQueueNewOutput(ctypes.byref(asbd), self._cb_keepalive,
-                                   None, None, None, 0, ctypes.byref(q))
-        if r != 0:
-            self.status = f"sound: AudioQueueNewOutput {r}"
+        # Portable output (CoreAudio on macOS, pygame.mixer on Windows) --
+        # same pull cadence the inline AudioQueue code had: 4096 frames.
+        self.out = macaudio.make_output(4096, self._fill)
+        if self.out is None:
+            self.status = f"sound: {macaudio.OUTPUT_ERROR}"
             return False
-        self.aq = q
-        for _ in range(3):
-            bref = ctypes.c_void_p()
-            if at.AudioQueueAllocateBuffer(q, nfr_bytes := 4096 * 4,
-                                           ctypes.byref(bref)) != 0:
-                self.status = "sound: buffer alloc failed"
-                return False
-            self.bufs.append(bref)
-            self._callback(None, q, bref)
-        if at.AudioQueueStart(q, None) != 0:
-            self.status = "sound: AudioQueueStart failed"
-            return False
+        self.aq = self.out                 # truthiness for describe()/fills
         self.thread = threading.Thread(target=self._produce, daemon=True)
         self.thread.start()
         self.status = "sound: ready"
@@ -353,11 +328,13 @@ class DeckSound:
     def close(self):
         self.stop.set()
         self.want.set()
-        if self.aq is not None:
+        out = getattr(self, "out", None)
+        if out is not None:
             try:
-                self.at.AudioQueueStop(self.aq, True)
+                out.close()
             except Exception:
                 pass
+            self.out = None
             self.aq = None
 
     def describe(self):

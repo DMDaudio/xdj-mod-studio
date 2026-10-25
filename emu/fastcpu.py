@@ -41,6 +41,10 @@ _REGS = ("pc", "pr", "gbr", "vbr", "mach", "macl", "sr", "ssr", "spc", "sgr",
          "ttb", "mmucr", "ccr", "fpscr", "fpul")
 
 
+class _DspRegion(ctypes.Structure):
+    _fields_ = [("base", u32), ("len", u32), ("ptr", vp)]
+
+
 class Core(ctypes.Structure):
     _fields_ = ([("r", u32 * 16), ("alt", u32 * 8)] +
                 [(n, u32) for n in _REGS] +
@@ -62,7 +66,10 @@ class Core(ctypes.Structure):
                  ("cs6_py", u32), ("cs6_pad", u32),
                  ("tdg_reg", u32 * 64), ("tdg_ssr", u32),
                  ("tdg_dirty", u64), ("tdg_dirty_ssr", u64),
-                 ("tdg_py", u32), ("tdg_pad", u32)])
+                 ("tdg_py", u32), ("tdg_pad", u32),
+                 ("cs6_fast", u32), ("dsp_region_n", u32),
+                 ("dsp_region", _DspRegion * 8),
+                 ("cur_pc", u32), ("cur_pad", u32), ("run_commit", u64)])
 
 
 _lib = None
@@ -104,7 +111,7 @@ def load_lib():
         # a reference build (XDJ_FASTCORE_LIB) predating the newest fields is
         # fine: the C side reads its own (shorter) struct prefix only, and the
         # extra ctypes tail just stays untouched.  Anything else is a bug.
-        if not (_alt and 0 < ctypes.sizeof(Core) - lib.core_sizeof() <= 512):
+        if not (_alt and 0 < ctypes.sizeof(Core) - lib.core_sizeof() <= 1024):
             raise RuntimeError("fastcore.c / fastcpu.py struct layout mismatch")
     try:
         lib.core_hpid  # noqa: B018 (pre-capture reference builds lack it)
@@ -119,6 +126,24 @@ def load_lib():
         object.__setattr__(lib, "core_hpid", _fn)
         _fn.argtypes = [ctypes.POINTER(Core), ctypes.POINTER(u64)]
         _fn.restype = ctypes.c_void_p
+    # cs6_fast region serving (2026-10-24): absent in pre-capture reference
+    # builds -- stub to no-ops so cs6_fast simply never arms there.
+    for _nm, _sig in (("core_clear_dsp_regions",
+                       ([ctypes.POINTER(Core)], None)),
+                      ("core_add_dsp_region",
+                       ([ctypes.POINTER(Core), u32, u32, vp], ctypes.c_int))):
+        try:
+            getattr(lib, _nm).argtypes = _sig[0]
+            getattr(lib, _nm).restype = _sig[1]
+        except AttributeError:
+            if _nm == "core_clear_dsp_regions":
+                def _clr(_c, _b=[]):
+                    return None
+                object.__setattr__(lib, _nm, _clr)
+            else:
+                def _add(*_a):
+                    return -1
+                object.__setattr__(lib, _nm, _add)
     _lib = lib
     return lib
 
@@ -150,6 +175,7 @@ class FastSH4:
         self.fpu = None
         self._pins = None
         self._pin_ids = None
+        self._dsp_keep = []             # ctypes views of DSP RAM regions
         self._py = None
         # cached word-read helper (emu.usb_fast), imported once, not per crossing
         try:
@@ -297,25 +323,28 @@ class FastSH4:
     # -- 2DG register-file mirror (emu/tdg.py TDG) ---------------------------
     def _tdg_out(self):
         """Flush the C 2DG register mirror into the Python device."""
+        c = self.core
+        if not c.tdg_dirty and not c.tdg_dirty_ssr:
+            return                       # mirror not in use (2026-10-24)
         t = getattr(self.mem.dev, "tdg", None)
         if t is None:
             return
-        c = self.core
         for w in range(64):
             if c.tdg_dirty >> w & 1:
                 t.reg[w * 4] = c.tdg_reg[w] & 0xFFFFFFFF
-        if c.tdg_dirty:
-            c.tdg_dirty = 0
+        c.tdg_dirty = 0
         if c.tdg_dirty_ssr:
             t.ssr = c.tdg_ssr & 0xFFFFFFFF
             c.tdg_dirty_ssr = 0
 
     def _tdg_in(self):
         """Adopt the Python device's 2DG registers into C."""
+        c = self.core
+        if not c.tdg_dirty and not c.tdg_dirty_ssr:
+            return                       # nothing to adopt (mirror unused)
         t = getattr(self.mem.dev, "tdg", None)
         if t is None:
             return
-        c = self.core
         for i in range(64):
             c.tdg_reg[i] = t.reg.get(i * 4, 0) & 0xFFFFFFFF
         c.tdg_dirty = 0
@@ -397,7 +426,10 @@ class FastSH4:
         # the HPI poll crosses hundreds of thousands of times per second.
         if 0x18000000 <= a < 0x18100000:
             try:
-                return self._cached_dspemu()._cs6_read(a, 1) & 0xFF
+                d = self._cached_dspemu()
+                if self.core.cs6_fast:
+                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                return d._cs6_read(a, 1) & 0xFF
             except Exception as e:
                 self._io_err = repr(e)
                 object.__setattr__(self, "_cs6_dev", None)
@@ -423,7 +455,10 @@ class FastSH4:
         a &= 0xFFFFFFFF
         if 0x18000000 <= a < 0x18100000:
             try:
-                self._cached_dspemu()._cs6_write(a, 1, v & 0xFF)
+                d = self._cached_dspemu()
+                if self.core.cs6_fast:
+                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                d._cs6_write(a, 1, v & 0xFF)
                 return                      # HPIC/HPIA never raise interrupts
             except Exception as e:
                 self._io_err = repr(e)
@@ -457,9 +492,17 @@ class FastSH4:
                 if is2dg:
                     self._tdg_in()
                 if not is2dg:
-                    # the C64x co-simulation is time-locked PER BYTE ACCESS
-                    # (every sync() call feeds the DSP clock), so the bytes
-                    # must be seen one at a time even in one crossing
+                    if self.core.cs6_fast:
+                        d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                    # The C64x co-simulation is time-locked PER WORD, not per
+                    # byte: a 32-bit HPI access reads the same latched word
+                    # four bytes would (auto-increment fires at the same
+                    # boundary), so one dspemu.read(a, n) replaces the byte
+                    # loop. This is where the firmware's HPI polling spent
+                    # 3 of its 4 Python crossings (2026-10-24 profile:
+                    # ~490k CS6 byte crossings per emulated second).
+                    if n in (2, 4) and not (a & (n - 1)):
+                        return d._cs6_read(a, n) & ((1 << (8 * n)) - 1)
                     v = 0
                     for i in range(n):
                         v |= d._cs6_read(a + i, 1) << (8 * i)
@@ -490,6 +533,15 @@ class FastSH4:
         if 0x18000000 <= a < 0x18100000:
             try:
                 d = self._cached_dspemu()
+                if self.core.cs6_fast:
+                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                # word-at-a-time for the aligned 16/32-bit HPI stores (the
+                # PCM pump): dspdev.write's size-n path assembles exactly
+                # what n byte writes would (RMW on HPIA/HPIC, word assembly
+                # on HPID), with one Python crossing instead of four.
+                if n in (2, 4) and not (a & (n - 1)):
+                    d._cs6_write(a, n, v & ((1 << (8 * n)) - 1))
+                    return
                 cs6_write = d._cs6_write
                 for i in range(n):             # byte-by-byte (see _io_rds)
                     cs6_write(a + i, 1, (v >> (8 * i)) & 0xFF)
@@ -577,6 +629,30 @@ class FastSH4:
         de = getattr(dev, "dspemu", None)
         if de is not None and de.clock is None:     # time-lock the real DSP
             de.clock = lambda c=c: c.cycles
+        # cs6_fast (XDJ_DSP_CS6C=0 disables): the C core serves HPIA and
+        # host HPID reads out of the DSP's own RAM, so the firmware's HPI
+        # poll loops stop crossing to Python entirely. This core's mirror
+        # becomes the owner of HPIA; every remaining CS6 crossing adopts
+        # it into dspdev.hpia first, and dspdev pushes its own mutations
+        # (DMAC bulk path) back into the mirror.
+        want_fast = (de is not None
+                     and os.environ.get("XDJ_DSP_CS6C", "1") != "0")
+        if want_fast and not c.cs6_fast:
+            lib.core_clear_dsp_regions(c)
+            for lo, hi, buf in de.bus.ram:
+                arr = (ctypes.c_char * len(buf)).from_buffer(buf)
+                self._dsp_keep.append(arr)
+                if lib.core_add_dsp_region(c, lo, hi - lo,
+                                           ctypes.addressof(arr)) != 0:
+                    break
+            c.dsp_region_n = min(8, len(de.bus.ram))
+            c.cs6_addr = de.hpia
+            de._cs6_mirror = c
+            c.cs6_fast = 1
+        elif not want_fast and c.cs6_fast:
+            c.cs6_fast = 0
+            if de is not None:
+                de._cs6_mirror = None
         c.low_is_ram = 1 if mem.low_is_ram else 0
         c.fb_writes = 0
         done = u64()

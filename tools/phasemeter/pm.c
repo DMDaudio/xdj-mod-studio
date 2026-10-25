@@ -8,7 +8,8 @@
  * Called from pmhook.S on every 2DG flush (FUN_08E7D278(r4 dev, r5 req)).
  * Draws only when:
  *   - the request is the full-screen UI quad (same test as perform_pads),
- *   - the main screen is up (mode word [0x0BA371D4] == 1),
+ *   - the main screen (mode word [0x0BA371D4] == 1) or the PERFORM screen
+ *     (== 7, same meter 103 px higher) is up,
  *   - MODS are on and PM_MODE == 1,
  *   - the meter is actually visible (stock box border pixel, or our own
  *     sentinel pixel) -> an open Browse list / popup is never painted over.
@@ -51,10 +52,15 @@ typedef unsigned int u32;
 #define X0 260
 #define X1 471
 #define CX 366
-#define OY 124                   /* orange (master) line */
-#define BY 150                   /* blue (this deck) line */
-#define TOPY 116
-#define BOTY 158
+/* main-screen rows; on the PERFORM screen the stock meter sits exactly
+ * 103 px higher (same x, same box sizes -- 2026-10-25, tester: "PERFORM
+ * shows the 4-beat boxes instead of the phase meter") -> pm_dy */
+#define PERFORM_DY (-103)
+static int pm_dy;
+#define OY (124 + pm_dy)         /* orange (master) line */
+#define BY (150 + pm_dy)         /* blue (this deck) line */
+#define TOPY (116 + pm_dy)
+#define BOTY (158 + pm_dy)
 
 #define RGB(r, g, b) (u16)((((r) >> 3) << 11) | (((g) >> 2) << 5) | ((b) >> 3))
 #define C_OR   RGB(232, 141, 33)
@@ -169,7 +175,7 @@ void pm_draw(u16 *lay, int stride)
     for (int y = 0; y < LABEL_H; y++)                /* MASTER CLOCK */
         for (int x = 0; x < LABEL_W; x++) {
             int a = label_alpha[y * LABEL_W + x];
-            if (a) put(lay, stride, LABEL_X + x, LABEL_Y + y, blend(C_OR, a));
+            if (a) put(lay, stride, LABEL_X + x, LABEL_Y + pm_dy + y, blend(C_OR, a));
         }
     put(lay, stride, X0 - 2, TOPY, SENTINEL);
     pm_draws++;
@@ -179,14 +185,18 @@ void pm_draw(u16 *lay, int stride)
 void pm_hook(u32 dev, u32 req)
 {
     (void)dev;
-    if (pm_mode != 1 || R8(MSOFF) || R32(MODEW) != 1) return;
+    if (pm_mode != 1 || R8(MSOFF)) return;
+    u32 mw = R32(MODEW);
+    if (mw == 1) pm_dy = 0;                            /* main screen */
+    else if (mw == 7) pm_dy = PERFORM_DY;              /* PERFORM screen */
+    else return;
     const u32 *w = (const u32 *)R32(req);              /* display list */
     if (!w || w[13] != 0x4C || w[16] != 0x58) return;
     if ((w[27] >> 24) != 0x82 || w[29] != 0x032001E0u) return;
     u16 *lay = (u16 *)UNCACHED(w[14]);
     int stride = (int)w[17];
     if (stride < 800 || stride > 1024) return;
-    u16 b = lay[120 * stride + 260], s = lay[TOPY * stride + X0 - 2];
+    u16 b = lay[(120 + pm_dy) * stride + 260], s = lay[TOPY * stride + X0 - 2];
     if (b != STOCK_BORDER && s != SENTINEL) return;   /* meter not visible */
     u32 h = hash_preview();
     if (h != pm_hash) { pm_hash = h; snapshot_grid(); }

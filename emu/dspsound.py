@@ -2,14 +2,23 @@
 
 The real DSP produces stereo s16 audio through McASP2's data port
 (emu/c6x/periph.py McAsp.out: 32-bit slot words alternating L, R at
-44.1 kHz, each an MSB-aligned sample -- the top 16 bits). This bridge drains that stream into the
-same AudioQueue output decksound uses, so "press play" in the app plays
-the emulated deck out loud. Pitch/mute controls pass through (mute only;
-pitch comes from the DSP itself via the firmware's own tempo path).
+44.1 kHz, each an MSB-aligned sample -- the top 16 bits). This bridge drains that stream into
+the platform output (macaudio.make_output: CoreAudio on macOS, pygame.mixer
+on Windows), so "press play" in the app plays the emulated deck out loud.
+Pitch/mute controls pass through (mute only; pitch comes from the DSP
+itself via the firmware's own tempo path).
+
+Sub-real-time hosts (the norm today: the SH interpreter sustains only a
+fraction of 500 MHz): the consumer measures production and switches to
+BURST MODE below ~85% of real time -- whole-buffer takes only, so audio
+arrives as clean passages at exact pitch separated by quiet holds, never
+the music-and-silence-in-one-buffer machine gun. ~95%+ production plays
+gapless (smooth mode). See tools/dsp_audio_diag.py for the harness.
 
 attach(machine) -> DspSound or None (no dspemu = None).
-sync() every ~0.1 s from the UI loop: opens the queue on first play and
-    keeps the consumer fed by advancing a drained-frames counter.
+sync() every ~0.1 s from the UI loop: opens the queue on first play,
+tracks the production rate and keeps the consumer fed by advancing a
+drained-frames counter.
 describe() merges into the sound status the host UIs already read.
 Note: asp1.out is a bounded list (keep ~= 60 s); the ring-drain counter
      assumes words keep arriving during play; on seek backward the
@@ -29,6 +38,23 @@ SR = 44100
 _LPCM_S16LE = (1 << 2) | (1 << 3)          # signed integer | packed
 SAMPLE_SHIFT = 16                           # sample = top 16 bits of a slot word
 MODE_PLAYING = 5
+# Sub-real-time production: the cosim sustains only a fraction of the
+# deck's cycle rate (2026-10-24: ~11% on an M5 -- the SH interpreter is
+# the wall; see tools/dsp_rate_bench.py). Playing whatever trickles out
+# at the AudioQueue's own 44.1 kHz cadence mixes music and silence
+# inside single buffers -- the machine-gun stutter. Instead the consumer
+# switches to BURST MODE when measured production stays under ~85% of
+# real time: takes only WHOLE buffers, so the backlog comes out as clean
+# contiguous passages separated by quiet holds, and the deck's pitch is
+# exact. Above ~95% production it returns to the smooth take-what's-there
+# mode (gapless at 100%).
+BURST_ENTER = 0.85
+BURST_EXIT = 0.95
+BURST_WINDOW = 0.5                          # s between production samples
+# How much audio to bank before releasing a burst (seconds). At fraction f
+# of real time, a burst lasts BURST_S and the following hold ~BURST_S/f:
+# 0.25 s passages every ~2.3 s at 11%, near-seamless as f -> 1.
+BURST_S = float(os.environ.get("XDJ_DSP_BURST_S", "0.25"))
 
 
 class DspSound:
@@ -40,12 +66,20 @@ class DspSound:
         self.served = 0
         self.lock = threading.Lock()
         self.aq = None
+        self.out = None             # the live output (AudioQueue / pygame)
         self.at = None
         self.bufs = []
         self._cb = None
         self._drained = 0            # asp1 output words already consumed
         self._open_failed = False
         self._nfr = 4096
+        # -- burst mode (sub-real-time production; see above):
+        self.burst = False           # gate engaged (whole-buffer takes only)
+        self._releasing = False      # draining a banked burst
+        self.prod_rate = 1.0         # measured words/s as a fraction of 2*SR
+        self._prod_t = None          # last production sample (wall time)
+        self._prod_w = 0             # len(asp1.out) at that sample
+        self.holds = 0               # silent callbacks while the gate held
         # -- diagnostics (the 2026-10-16 machine-gun audit; all counters
         #    count plane-level gaps of the L/R interleaved stream):
         self.gaps = 0                # callbacks that found NO fresh audio
@@ -78,20 +112,40 @@ class DspSound:
             return False
 
     # -- consumer ----------------------------------------------------------
-    def _callback(self, user, aq, bufref):
-        nfr = self._nfr
+    def _filler(self, nfr):
+        """nfr stereo frames of s16le bytes for one output period."""
         out = np.zeros((nfr, 2), np.int32)
         asp = self._asp()
         took = 0
+        held = False
         if asp is not None and self.playing and not self.muted:
             with self.lock:
                 avail = max(0, len(asp.out) - self._drained)
                 take_words = min(avail, nfr * 2)
+                # BURST GATE (sub-real-time production): hold (emit silence)
+                # until BURST_S of audio is backlogued, then release and
+                # take WHOLE buffers until less than one remains. Partial
+                # takes are what made sub-real-time playback a machine
+                # gun: every buffer held some music and some silence,
+                # L/R planes drifted. (The not-primed first-take
+                # relaxation is smooth-mode only: in burst mode the hold
+                # itself guarantees the first audible take is full.)
+                burst_min = max(nfr * 2, int(BURST_S * 2 * SR))
+                if self.burst:
+                    if self._releasing:
+                        if avail < nfr * 2:
+                            self._releasing = False
+                    elif avail >= burst_min:
+                        self._releasing = True
+                    if not self._releasing:
+                        take_words = 0
+                        held = True
                 # stall cleanly on a partial take: enqueue the whole buffer
                 # only when a FULL frame's worth arrived (fix for the
                 # machine-gun pattern: half-takes left one channel stale
                 # while the other advanced -- audible as a one-ear tick).
-                if take_words >= nfr * 2 or (take_words > 0 and not self.primed):
+                if take_words >= nfr * 2 or (take_words > 0 and not self.primed
+                                              and not self.burst):
                     raw = asp.out[self._drained:self._drained + take_words]
                     self._drained += take_words
                     a = np.array(raw, dtype=np.uint32).view(np.int32)
@@ -106,13 +160,20 @@ class DspSound:
                     lr[:, 1] = a[1::2] >> SAMPLE_SHIFT               # right
                     out[:n] = lr
                     took = n
+                    if n >= nfr:
+                        # first WHOLE buffer: the producer is flowing --
+                        # partial takes (the prime relaxation) end here
+                        self.primed = True
                 self.lag = max(0, len(asp.out) - self._drained)
         # -- gap bookkeeping (the plane-gap counters from the pain report)
         if self.playing and not self.muted:
             if took == 0:
-                self.gaps += 1
-                self.stalls += 1
-                self.max_stall = max(self.max_stall, self.stalls)
+                if held:
+                    self.holds += 1         # expected in burst mode: quiet
+                else:
+                    self.gaps += 1
+                    self.stalls += 1
+                    self.max_stall = max(self.max_stall, self.stalls)
             else:
                 if took < nfr:
                     self.half += 1
@@ -123,38 +184,22 @@ class DspSound:
                     # interleave, so a short take starves R specifically)
                     self.r_edge += 1
                 self.stalls = 0
-        data = (np.clip(out, -32768, 32767)).astype("<i2").tobytes()
+        self.served += nfr
+        return (np.clip(out, -32768, 32767)).astype("<i2").tobytes()
+
+    def _callback(self, user, aq, bufref):
+        data = self._filler(self._nfr)
         b = ctypes.cast(bufref, ctypes.POINTER(macaudio._AQB)).contents
-        ctypes.memmove(b.mAudioData, data, nfr * 4)
-        b.mAudioDataByteSize = nfr * 4
+        ctypes.memmove(b.mAudioData, data, self._nfr * 4)
+        b.mAudioDataByteSize = self._nfr * 4
         if self.at is not None:
             self.at.AudioQueueEnqueueBuffer(aq, bufref, 0, None)
-        self.served += nfr
 
     def _open_queue(self):
-        at = macaudio._audio_toolbox()
-        macaudio._bind(at)
-        for fn in ("AudioQueueStart", "AudioQueueStop"):
-            getattr(at, fn).argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-            getattr(at, fn).restype = ctypes.c_int32
-        self.at = at
-        asbd = macaudio._ASBD()
-        asbd.mSampleRate = float(SR)
-        asbd.mFormatID = 0x6C70636D                     # 'lpcm'
-        asbd.mFormatFlags = _LPCM_S16LE
-        asbd.mBytesPerPacket = 4
-        asbd.mFramesPerPacket = 1
-        asbd.mBytesPerFrame = 4
-        asbd.mChannelsPerFrame = 2
-        asbd.mBitsPerChannel = 16
-        self._cb = macaudio._CB(self._callback)
-        q = ctypes.c_void_p()
-        r = at.AudioQueueNewOutput(ctypes.byref(asbd), self._cb,
-                                   None, None, None, 0, ctypes.byref(q))
-        if r != 0:
-            self.status = f"sound: AudioQueueNewOutput {r}"
+        if os.environ.get("XDJ_DECK_SOUND") == "0":
+            self.status = "sound: disabled (XDJ_DECK_SOUND=0)"
+            self._open_failed = True   # tests drive _filler directly
             return False
-        self.aq = q
         # Prime the DSP before the first take: the pain report's root #2
         # (nothing written yet -> the prime reads zeros; the R plane
         # suffers first because it is the TOP half of each 32-bit word).
@@ -167,17 +212,13 @@ class DspSound:
             self.primed = bool(de.asp1.out)
         else:
             self.primed = False
-        for _ in range(3):
-            bref = ctypes.c_void_p()
-            if at.AudioQueueAllocateBuffer(q, self._nfr * 4,
-                                           ctypes.byref(bref)) != 0:
-                self.status = "sound: buffer alloc failed"
-                return False
-            self.bufs.append(bref)
-            self._callback(None, q, bref)
-        if at.AudioQueueStart(q, None) != 0:
-            self.status = "sound: AudioQueueStart failed"
+        # Portable output (CoreAudio AudioQueue, pygame.mixer on Windows).
+        # The consumer cadence is identical on both: nfr frames per period.
+        self.out = macaudio.make_output(self._nfr, self._filler)
+        if self.out is None:
+            self.status = f"sound: {macaudio.OUTPUT_ERROR}"
             return False
+        self.aq = self.out                    # truthiness for describe()
         self.status = "sound: ready (real DSP)"
         return True
 
@@ -218,6 +259,26 @@ class DspSound:
         asp = self._asp()
         if asp is not None and self._drained > len(asp.out) + self._nfr * 8:
             self._drained = max(0, len(asp.out) - self._nfr)
+        # -- burst-mode hysteresis: sample the production rate every
+        #    BURST_WINDOW seconds; hold-and-release under BURST_ENTER,
+        #    smooth takes again once production is effectively real time.
+        if asp is not None and playing:
+            now = time.time()
+            if self._prod_t is None:
+                self._prod_t, self._prod_w = now, len(asp.out)
+            elif now - self._prod_t >= BURST_WINDOW:
+                dt = now - self._prod_t
+                self.prod_rate = (len(asp.out) - self._prod_w) / dt / (2 * SR)
+                self._prod_t, self._prod_w = now, len(asp.out)
+                if self.burst and self.prod_rate > BURST_EXIT:
+                    self.burst = False
+                    self._releasing = False
+                elif not self.burst and self.prod_rate < BURST_ENTER:
+                    self.burst = True
+                    self._releasing = False
+                    self.holds = 0
+        elif not playing:
+            self._prod_t = None
 
     def set_mute(self, muted):
         self.muted = bool(muted)
@@ -231,6 +292,8 @@ class DspSound:
                 "muted": self.muted, "pitch": 0.0,
                 "follows_firmware": True, "hold": None, "hold_duty": None,
                 "status": self.status, "track": None,
+                "burst": self.burst,
+                "prod_rate": round(self.prod_rate, 3),
                 "plane_gaps": {"gap_callbacks": self.gaps,
                                "partial_takes": self.half,
                                "stall_run": self.stalls,
@@ -239,15 +302,18 @@ class DspSound:
                                "primed": self.primed,
                                "skipped_words": self.trimmed_total,
                                "l_edge": self.l_edge,
-                               "r_edge": self.r_edge}}
+                               "r_edge": self.r_edge,
+                               "burst_holds": self.holds}}
 
     def close(self):
-        try:
-            if self.aq is not None and self.at is not None:
-                self.at.AudioQueueStop(self.aq, None)
-                self.aq = None
-        except Exception:
-            pass
+        out = getattr(self, "out", None)
+        if out is not None:
+            try:
+                out.close()
+            except Exception:
+                pass
+            self.out = None
+            self.aq = None
 
 
 atexit.register(lambda: SOUND[0] is not None and SOUND[0].close())

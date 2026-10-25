@@ -72,6 +72,10 @@ if [ -f build/phasemeter/pm.bin ]; then
   mkdir -p "$REPO/build/phasemeter"
   cp build/phasemeter/pm.bin build/phasemeter/pm.syms "$REPO/build/phasemeter/"
 fi
+# UTILITY mod rows (our C)
+sh tools/utility/build.sh >/dev/null
+mkdir -p "$REPO/build/utility"
+cp build/utility/ut.bin build/utility/ut.syms "$REPO/build/utility/"
 # 8 hot cue pages (our C; build needs the SH compiler on this Mac)
 HCPAGE=$(.venv/bin/python -c "import sys;sys.path[:0]=['tools'];import perform_pads as P;print(hex(P.HCPAGE))")
 PMODE=$(.venv/bin/python -c "import sys;sys.path[:0]=['tools'];import perform_pads as P;print(hex(P.PST+2))")

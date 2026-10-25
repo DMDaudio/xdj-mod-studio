@@ -59,6 +59,11 @@ MSTAPP = MS + 0x7F5                # u8 1 = theme applied this boot
 MSTNAME = MS + 0x800               # 16-B ASCII theme name (theme installer)
 MSGATE = MS + 0x7F8                 # u8 hot-cue gate (0 off, 1 gate)
 MSBRAKE = MS + 0x7F9                # u8 vinyl brake length index (0 = 1x)
+# 2026-10-25: [THEME] is only shown when theme switching is installed
+# (MSTNAME[0] != 0). Without it the row was a dead "-" that pushed
+# [HOT CUE] off the 7-row popup on a linked deck (tester: "one player has
+# the Hot Cue Gate row, the other doesn't"). MSKB = first kind shown.
+MSKB = MS + 0x7FA                   # u8 0 = [THEME] shown, 1 = hidden
 # [VINYL BRAKE] (2026-10-18): brake length = K / ..., K = the one literal
 # at 0x08D3714C (tools/brake_length_apply.py, CLAUDE.md §120)
 BRAKE_LIT, BRAKE_STOCK = 0x08D3714C, 6_000_000
@@ -69,9 +74,10 @@ MSEND = MS + 0x820
 THEME_TABLE = 0x081DD7FC if os.environ.get("THEMESW_DISABLE") else TS.TS_BASE
 
 # Kind order = popup order; with >2 stock rows (Pro DJ Link adds
-# [BACKGROUND COLOR]) the popup's 7-row limit drops the HIGHEST kind.
-# [HOT CUE] is last on purpose (2026-10-21): the gate is the one mod row
-# worth losing on a linked deck; [VINYL BRAKE] must stay reachable.
+# [BACKGROUND COLOR]) the popup's 7-row limit can't hold all five:
+# 2026-10-25 (tester: the linked player had no Hot Cue Gate row) [THEME]
+# is the one left out then -- unlink to change themes; the gate and the
+# brake stay reachable while mixing. (Was: [HOT CUE] dropped, 2026-10-21.)
 LABELS = ["[THEME]", "[MODS]", "[WAVEFORM]", "[VINYL BRAKE]", "[HOT CUE]"]
 NROWS = len(LABELS)
 TITLES = ["WAVE FORM COLOR", "KEY / STEMS"]
@@ -125,12 +131,25 @@ mappend:                    ; = show fn of the main MY SETTINGS list
   mov #3,r0
   cmp/hi r0,r8              ; already > 3 rows: leave it alone
   bt apdone
-  mov #7,r0                 ; our rows = min(NROWS, 7 - n) (popup holds 7)
+  mov #7,r0                 ; room = 7 - n (popup holds 7)
   sub r8,r0
+  mov.l @({MSTNAME:#x},pc),r1
+  mov.b @r1,r1
+  tst r1,r1                 ; no theme switching installed -> skip [THEME]
+  movt r2                   ; r2 = first kind (0 or 1)
   mov #{NROWS},r1
+  cmp/hs r1,r0              ; no room for all rows (linked deck: stock
+  bt apk                    ; [BACKGROUND COLOR]) -> skip [THEME] too, so
+  mov #1,r2                 ; [HOT CUE] + [VINYL BRAKE] stay reachable
+apk:
+  mov.l @({MSKB:#x},pc),r1
+  mov.b r2,@r1
+  ; our rows = min(NROWS - kb, room)
+  mov #{NROWS},r1
+  sub r2,r1
   cmp/hi r1,r0
   bf apc
-  mov #{NROWS},r0
+  mov r1,r0
 apc:
   mov.l r0,@-r15
   mov.l @({MSST:#x},pc),r1
@@ -149,8 +168,14 @@ apl:
   mov #0,r1
   mov.l r1,@(8,r0)
   mov r0,r4
+  mov.l @({MSKB:#x},pc),r1
+  mov.b @r1,r1
+  add r1,r9                 ; r9 = kind of this row
   bsr rowtext               ; r4 = row, r9 = kind
   nop
+  mov.l @({MSKB:#x},pc),r1
+  mov.b @r1,r1
+  sub r1,r9                 ; back to the row counter
   add #1,r9
   mov.l @r15,r0
   cmp/hs r0,r9
@@ -321,7 +346,10 @@ mpush:                      ; = push handler (r4 ctx, r5, r6 p3)
   mov.b @r2,r2
   extu.b r2,r2
   sub r2,r1                 ; k = row - first
+  mov.l @({MSKB:#x},pc),r3
+  mov.b @r3,r3
   mov #{NROWS},r0
+  sub r3,r0                 ; rows of ours
   cmp/hs r0,r1
   bf ours
 porig:
@@ -335,6 +363,9 @@ ours:
   add r2,r1
   mov.b r1,@r3              ; debug: absolute cursor row
   sub r2,r1                 ; r1 = k again for dispatch below
+  mov.l @({MSKB:#x},pc),r3
+  mov.b @r3,r3
+  add r3,r1                 ; r1 = kind (skips a hidden [THEME])
   sts.l pr,@-r15
   mov.l r8,@-r15
   mov.l r9,@-r15
@@ -555,6 +586,9 @@ def emu():
     for a, b in VR.plan():
         mem.w8(a, b)
     install(mem)
+    if os.environ.get("THEMEROW"):              # theme switching "installed"
+        for i, b in enumerate(b"OFF\0"):
+            mem.w8(MSTNAME + i, b)
 
     def key(k, hold=12_000_000, after=25_000_000):
         dev.panel_frame = panl.build_frame(keys=[k])
@@ -579,6 +613,9 @@ def emu():
     def row_text(k):
         L = find_list()
         if L is None:
+            return ""
+        k -= mem.r8(MSKB)                 # kind -> row ([THEME] hidden?)
+        if k < 0:
             return ""
         r = L + 0x118 + (mem.r8(MSST) + k) * 0x10C + 12
         s = ""
@@ -610,7 +647,7 @@ def emu():
         if any(row_text(i) for i in range(5)):
             key("Back")                # ensure closed (MENU toggles)
         key("MenuUtility")             # open fresh, cursor on top
-        turn(base + k)
+        turn(base + k - mem.r8(MSKB))
         cur = k
 
     goto(2)
@@ -634,9 +671,13 @@ def emu():
     ok &= mem.r8(RO.MODE_ADDR) == mode1
     print("rows:", rows())
     fb_png(m, f"{out}/c_final.png")
-    goto(0)
-    print("rows:", rows())
-    ok &= row_text(0).startswith("[THEME]")
+    if mem.r8(MSKB):                        # no theme switching here:
+        print("rows:", rows())              # [THEME] hidden, HOT CUE shown
+        ok &= not row_text(0) and row_text(1).startswith("[MODS]")
+    else:
+        goto(0)
+        print("rows:", rows())
+        ok &= row_text(0).startswith("[THEME]")
     goto(4)
     key("RotaryPush")                       # HOT CUE -> GATE
     print(f"HOT CUE push: gate={mem.r8(MSGATE)}")

@@ -205,6 +205,15 @@ class DspDevice:
         self.debt = 0.0
         self.ratio = DSP_PER_SH       # DSP cycles per SH cycle (lower = faster
                                       # emulation while nothing plays)
+        # Sub-threshold syncs are no-ops: the firmware polls HPI state in
+        # tight loops, and advancing the DSP for every ~dozen-cycle poll
+        # cost a Python+ctypes round trip each (2026-10-24: 410k advances
+        # per 10 s of play). Deferring to the next slice boundary is
+        # indistinguishable -- the data is at most MINSYNC*ratio DSP cycles
+        # stale and the poll loop just iterates again, exactly as on a host
+        # whose HPI reads are slower than the DSP. tick() keeps time
+        # flowing at every slice, so no handshake can deadlock on this.
+        self.minsync = int(os.environ.get("XDJ_DSP_MINSYNC", "128"))
         self.ahead = 0                # cycles run early by sync() (no clock)
         self.clock = None             # () -> SH cycle count (set by the C core)
         self.sh_seen = None           # SH cycle already accounted for
@@ -222,6 +231,15 @@ class DspDevice:
     def _word(self, a):
         return self.bus.read(a & ~3, 4)
 
+    def _hpia_set(self, v):
+        """HPIA changed on the Python side (crossings, DMAC/bulk paths);
+        push into the fast core's mirror, which owns HPIA while it runs
+        (cs6_fast -- see emu/fastcpu.py)."""
+        self.hpia = v & 0xFFFFFFFF
+        m = getattr(self, "_cs6_mirror", None)
+        if m is not None:
+            m.cs6_addr = self.hpia
+
     def read(self, a, size):
         """SH read of CS6 physical address a (1/2/4 bytes)."""
         self.sync()
@@ -235,7 +253,7 @@ class DspDevice:
                 b = off - port
                 v = self._word(self.hpia)
                 if inc and b + size >= 4:
-                    self.hpia = (self.hpia + 4) & 0xFFFFFFFF
+                    self._hpia_set(self.hpia + 4)
                 return (v >> (8 * b)) & ((1 << (8 * size)) - 1)
         return 0
 
@@ -258,7 +276,7 @@ class DspDevice:
         if 0x40000 <= off < 0x40004:
             sh = 8 * (off - 0x40000)
             m = ((1 << (8 * size)) - 1) << sh
-            self.hpia = ((self.hpia & ~m) | ((val << sh) & m)) & 0xFFFFFFFF
+            self._hpia_set(((self.hpia & ~m) | ((val << sh) & m)))
             return
         for port, inc in ((0x80000, True), (0xC0000, False)):
             if port <= off < port + 0x100 if inc else port <= off < port + 4:
@@ -269,7 +287,7 @@ class DspDevice:
                 if n >= 4:
                     self._store(self.hpia, cur & 0xFFFFFFFF)
                     if inc:
-                        self.hpia = (self.hpia + 4) & 0xFFFFFFFF
+                        self._hpia_set(self.hpia + 4)
                     self._acc.pop(port, None)
                 else:
                     self._acc[port] = (cur, n)
@@ -279,7 +297,7 @@ class DspDevice:
         """DMA burst into the auto-increment port (whole words)."""
         for k in range(0, len(data) - 3, 4):
             self._store(self.hpia, int.from_bytes(data[k:k + 4], "little"))
-            self.hpia = (self.hpia + 4) & 0xFFFFFFFF
+            self._hpia_set(self.hpia + 4)
 
     def _store(self, a, v):
         self.bus.write(a, 4, v)
@@ -402,6 +420,8 @@ class DspDevice:
         if not self.running or self.error or self.in_reset:
             self.sh_seen = now
             return
+        if bonus == 0 and self.minsync and now - self.sh_seen < self.minsync:
+            return                          # deferred (see MINSYNC above)
         self.debt += (now - self.sh_seen) * self.ratio
         self.sh_seen = now
         n = int(self.debt)
@@ -516,6 +536,9 @@ def state(d):
     if d.running and not d.error:
         if not _quiesce(d):
             raise RuntimeError("DSP never quiet enough to snapshot")
+    m = getattr(d, "_cs6_mirror", None)     # fast core owns HPIA: adopt it
+    if m is not None:
+        d.hpia = m.cs6_addr
     seen, regions = set(), []
     for lo, hi, buf in d.bus.ram:
         if id(buf) not in seen:
@@ -558,6 +581,7 @@ def restore(d, st):
     sp.regs, sp.rxempty, sp.rx = dict(st["spi"][0]), st["spi"][1], st["spi"][2]
     d.running, d.in_reset = st["running"], st["in_reset"]
     d.debt, d.credit, d.cycles, d.error = st["debt"], st["credit"], st["cycles"], st["error"]
+    d._hpia_set(st["hpia"])                # pushes into the fast-core mirror
     d.spi_tx = list(st["spi_tx"])
     d.sh_seen = None                  # re-anchored to the SH clock on first use
     if "intc" in st:

@@ -27,6 +27,7 @@ on and it is completely stock again.
 | Live stems | PERFORM › STEMS mutes vocals / drums / bass / other, heard after ~30 s |
 | Beat jump pads | PERFORM › BEAT JUMP, tap and swipe (1–64 beats) |
 | MY SETTINGS rows | waveform style, mods on/off, theme |
+| UTILITY rows | the same settings at the end of hold-MENU UTILITY (scrolls: every row, also on linked decks) — emulator only so far |
 
 **Working in the emulator, not yet tested on a deck.** These run against the
 deck's real firmware in the emulator, so they should work on a real deck,
@@ -36,7 +37,7 @@ but nobody has tried them on one yet:
 | --- | --- |
 | Faster stem mute (beta) | rewrites the audio the deck already buffered; < 1 s in the emulator |
 | Phase meter | this deck's beats; the master row needs link data |
-| Vinyl brake length | MY SETTINGS › [VINYL BRAKE], 0.5×–15× |
+| Vinyl brake length | MY SETTINGS › [VINYL BRAKE] or UTILITY › VINYL BRAKE LENGTH, 0.5×–15× |
 | 8 hot cues | pages A–C / D–F / G–H |
 | FLAC and Ogg Opus playback | own decoders on the deck |
 
@@ -51,7 +52,9 @@ but nobody has tried them on one yet:
      machine (the app starts, its pages load, the emulator engine loads).
      Running your firmware in the emulator and installing to a real deck
      from Windows have **not been tried by a person yet** (both are proven
-     on a Mac), and the emulator is silent on Windows for now. Please report how it goes.
+     on a Mac). Emulator sound on Windows shipped 2026-10-24 (pygame
+     mixer; the Mac uses CoreAudio) -- if it is silent for you, set
+     `XDJ_DECK_SOUND=1` and please report how it goes.
 2. **Add your firmware.** Get the official XDJ-700 firmware 1.15 update file
    from Pioneer DJ's support site and give it to Mod Studio when it asks.
    It checks the exact file, then builds everything it needs in about

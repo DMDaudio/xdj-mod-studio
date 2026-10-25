@@ -95,7 +95,7 @@ UIHTML = os.path.join(BUNDLE, "studio", "ui.html") if FROZEN else os.path.join(H
 
 APP_SUPPORT = app_support_dir()
 # the app's own release number (GitHub release tag v<APP_VERSION>)
-APP_VERSION = "0.9.7"
+APP_VERSION = "0.9.8"
 RELEASES_API = "https://api.github.com/repos/inter55/xdj-mod-studio/releases/latest"
 RELEASES_PAGE = "https://github.com/inter55/xdj-mod-studio/releases/latest"
 SETTINGS = os.path.join(APP_SUPPORT, "studio.json")
@@ -1252,6 +1252,7 @@ INSTALL_STEPS = [          # sessions per step (mock-deck measured 2026-10-12)
     ("5/5", "Centre waveform", 1),
     ("5b", "Key & stem switching", 1),
     ("5c", "MY SETTINGS rows", 1),
+    ("5u", "UTILITY rows", 2),
     ("5d", "PERFORM pads", 1),
     ("5f", "8 hot cue pages", 1),
     ("5g", "Live stems", 1),

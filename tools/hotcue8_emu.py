@@ -79,7 +79,11 @@ def build(stick):
         shutil.rmtree(stick)
     os.makedirs(os.path.dirname(os.path.join(stick, TRACK)))
     os.symlink(os.path.join(LIB, TRACK), os.path.join(stick, TRACK))
-    for rel in ("PIONEER/rekordbox", "PIONEER/USBANLZ/USBMNG.DAT",
+    # no PIONEER/rekordbox: since the usbdisk short-name fix (2026-10-18)
+    # the deck reads export.pdb and opens the library view, whose rows list
+    # the WHOLE library (tracks not on this mini stick -> E-8302 3658) --
+    # the folder view the navigation below expects needs the DB absent
+    for rel in ("PIONEER/USBANLZ/USBMNG.DAT",
                 "PIONEER/MYSETTING.DAT", "PIONEER/MYSETTING2.DAT",
                 "PIONEER/DEVSETTING.DAT", "PIONEER/DJMMYSETTING.DAT",
                 "PIONEER/djprofile.nxs", ANLZ):

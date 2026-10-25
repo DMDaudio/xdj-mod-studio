@@ -8,6 +8,30 @@ DJ's support site); the app checks it and builds everything from it.
 Apple Silicon Mac, macOS 14 or newer (Windows build: see the README inside
 the Windows zip). First launch: right-click the app → Open.
 
+## What changed in 0.9.8
+- **Phase meter on the PERFORM screen too.** It used to show only on the
+  main screen; on PERFORM you got the stock 4-beat boxes. The same meter
+  now draws there (same spot as the stock boxes), checked in the emulator
+  against the beat grid tick by tick.
+- **Mod settings in UTILITY.** Hold MENU and scroll to the end of the
+  deck's own UTILITY list: MODS, WAVEFORM COLOR, VINYL BRAKE LENGTH, HOT
+  CUE GATE and THEME, changed like any stock setting (push, turn, push).
+  UTILITY scrolls, so every row is there on every deck — the MY SETTINGS
+  popup only holds 7 rows, and with Pro DJ Link the deck adds its own
+  [BACKGROUND COLOR] row there, which is why the Hot Cue Gate row went
+  missing on a linked player. The MY SETTINGS rows stay too (on a linked
+  deck they now leave out [THEME] instead of [HOT CUE]); both menus change
+  the same settings. (A permanent UPD file still carries only the MY
+  SETTINGS rows; the UTILITY rows come with the USB install.)
+- **BEAT JUMP pads let go properly.** After a tap the deck's touch handler
+  sometimes stopped before our pad released its button signal, so the
+  jump "button" stayed held until the next touch (found in the emulator).
+  It's now released a few frames after your finger leaves the screen, which
+  matters with SLIP on.
+- **Emulator:** faster audio-chip emulation, cleaner sound when the
+  emulator can't keep up (short clean bursts instead of the machine-gun
+  stutter), and sound on Windows.
+
 ## What changed in 0.9.6
 - **Windows gets everything the Mac had.** The 0.9.5 Windows app was built
   from a stale snapshot of the source: the permanent-file builder with its
@@ -54,13 +78,17 @@ on a real deck too, but nobody has tried them on one yet:
 - **Faster stem mute (beta)** — rewrites the audio the deck has already
   buffered, so a mute is heard in under a second in the emulator.
 - **Phase meter with the live position source** — this deck's beats and
-  downbeats above the waveform (the 0.9.5 build's beats stood still on a
+  downbeats above the waveform, main screen and PERFORM (the 0.9.5 build's beats stood still on a
   deck; this one reads the clock's own word).
 - **Vinyl brake length** — MY SETTINGS › [VINYL BRAKE], 0.5× to 15×.
 - **8 hot cues** — A–H, in pages of three (swipe or tap the tab).
 - **FLAC and Opus** playback.
 
 ## Known issues
+- **Live key shift (beta, off by default):** one tester's deck freezes
+  with "file corrupted" when the key changes; it works on our deck and in
+  the emulator (MP3 and WAV, ±6 semitones), so we're still hunting the
+  difference. Leave it unticked if you play live.
 - The emulator's audio stutters (the emulated audio chip runs slower than
   real time). Browsing, loading and the screens are fine.
 - Stems need PWV6/PWV7 waveform data in the track's .EXT (rekordbox's

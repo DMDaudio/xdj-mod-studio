@@ -34,6 +34,32 @@ whenever they're needed.
   synthetic grid), permanent full + pm-only boot tests, repro_freeze
   all-mods play, app smoke.
 
+- v0.9.7 (2026-10-24): hotfix -- deck install crashed at job() (flac
+  keyword).
+- v0.9.8 (2026-10-25, salvofly's Windows list): phase meter also on the
+  PERFORM screen (pm.c pm_dy -103, phasemeter_test PERFORM leg); MY
+  SETTINGS hides [THEME] when theme switching isn't installed OR the popup
+  is short (linked deck) so [HOT CUE] gate + [VINYL BRAKE] stay (MSKB);
+  BEAT JUMP stale key bit released from rtkeep after 8 flushes with the
+  finger up (the hit-tester sometimes stopped before its countdown;
+  KQTAB/KSDRAW moved +0x48/+0x20); emulator audio work from 10-24.
+
+## Open tester reports -- after 0.9.8 (salvofly, 2026-10-25)
+- Key shift + MT freeze + "corrupted file": NOT reproduced (emu real DSP:
+  MP3 +-2, WAV +2/-6/+6 pitch exact, no DSP error; stock DSP with a tagged
+  BD8 word = harmless; no SH reader of 0x09D24DD8 besides the BD8 pusher).
+  Asked: file type, USB vs LINK source, steps, exact message. Suspects:
+  LINK-loaded track (same re-entrancy family as the LINK report), a format
+  we haven't run (AAC/M4A), tempo far from 0 + big shift.
+- 3 hot cues only: asked whether tracks have D-H + install log. The
+  8-pad grid prototype (docs/HOTCUE8_GRID.md) = "display all 8" if wanted.
+- RGB on one player: asked for MY SETTINGS state + same-version installs.
+- "N key toggles Quantize on the BEAT JUMP tab": QUANTIZE = zone 20
+  (642,232) handler KEY+91 bit 0x80; our pads end x 615 and the emu shows
+  no byte-91 change on any BJ tap. Asked what "N" is.
+- Suggestions: vinyl brake picker on the jog (row exists in MY SETTINGS),
+  FX (Echo/Reverb/Phaser), deck-side 3-band for unanalysed tracks.
+
 ## Open tester reports -- status after 0.9.6
 - Phase meter on-deck: 0.9.6 needs one hardware confirm (POSL source +
   the "flickers between ours and stock squares" report; the flush redraws
@@ -54,9 +80,42 @@ whenever they're needed.
 - Mac "too new version" (one report, no exact message): the app needs
   macOS 14+; get the exact wording before acting.
 - LINK: with mods on one deck, the OTHER deck couldn't load songs from
-  this deck's USB over Pro DJ Link (first report). Suspect our hooks on
-  the shared media fread/seek path (sm stems, vredirect, FLAC vfile layer) also
-  serve link requests -> check what the link server's reads go through.
+  this deck's USB over Pro DJ Link (first report). SOLVED TO THE
+  MECHANISM (static, 2026-10-24); cause not yet proven:
+  * the deck's generic Media API -- read 0x08DDFC96(buf,size,count,h,req),
+    seek 0x08DE00D6, tell 0x08DE0364, eof 0x08DE0510, size 0x08DE0E7A --
+    dispatches BY DEVICE TYPE; USB = type 3, implemented by the six slots
+    the FLAC layer replaces (close 0x08DDFD28, fread_direct 0x08DDFFD4,
+    seek 0x08DE0298, tell 0x08DE04FC, eof 0x08DE0768, size 0x08DE0F48)
+    plus the media read server's fread pool 0x08D5FFA8 (its only user --
+    what versions/stems hook). The server also dispatches type 4 ->
+    0x08C95760 (a cached-descriptor reader: lock helper 0x8C65860, cache
+    descriptor @handle; IDENTIFY -- plausibly the link/stream reader or
+    preview) and type 6 -> 0x08E1D2E0.
+  * 24 call sites of the generic read spread over browse/db/waveform/
+    loader modules, and the link stack is on the deck by name
+    (RemoteDBServer / LocalDBServer / CONTENTLINK tasks; "dbserver" is
+    Pioneer's link protocol) -> the link server almost certainly rides
+    the same USB slots. Our FLAC vfile sits under EVERY USB file
+    consumer incl. link serving; stems under the direct slot; versions
+    under the pool.
+  * foreign reads are handle-checked and mostly pass through BY DESIGN,
+    so the ranked suspects: (1) NO re-entrancy serialisation in vfile/sm
+    (one global decode ARENA; the link task entering while the player
+    task is inside = state corruption -- built and tested single-
+    consumer only), (2) a link-path access pattern one of the six
+    wrappers mishandles (5-arg generic read vs 4-arg slots; seek/tell/
+    size combos), (3) vredirect's new-handle trailer probe (3 extra
+    ops) tripping a dbserver response timeout, (4) innocent: link reads
+    take the type-4 reader and bypass all our hooks.
+  * NEXT (deck, one session, instrumented -- NO deck-code changes
+    before the evidence): rebuild vfile + sm with counters (entries per
+    slot fn, foreign-handle rate, passthrough vs virtualised, arena
+    re-entry hits), link two decks, peer loads 3 tracks, read the
+    counters over USB. Then serialise (busy flag -> straight to the
+    chained stock fn, no state touched) or gate by handle owner
+    per what fired. Native reentrancy test can extend
+    tools/xflac_vfile_test.py (blocking mock + second call).
 - FLAC not read on a deck: 0.9.6 install ends with the eject/reinsert
   note (types are classified at mount). Confirm it clears it.
 - 3-band "doesn't work" on a user's players (probably no PWV6/PWV7 in .EXT:
@@ -76,10 +135,17 @@ whenever they're needed.
 - Open Reddit report: "reverted when I played a song" (waiting on details).
 
 ## 0.9.6: emulator audio + OneLibrary converter
-- Emulator audio fixed: real-DSP emulator runs ~8% of real time -> stutter;
-  sound on Windows. Proof harness: tools/differ.py (identical state) +
-  tools/dsp_audio_diag.py. Note: the other agent's fastcore hot-device
-  change (2026-10-20) is behaviour-identical but showed no clear speedup.
+- Emulator audio (2026-10-24 session, CLAUDE.md 126): real time is out of
+  reach for the cosim -- the SH interpreter sustains ~77 Mcyc/s vs the 500
+  needed (JIT-scale project), and the SH is the PCM pump so the DSP can't
+  be decoupled. What shipped instead: honest core speedups (+15% cosim,
+  all differ-A/B-proven: CS6 word batching, C-side HPIA/HPID reads,
+  sync throttling, interpreter commit rework), BURST playback in DspSound
+  (sub-real-time hosts get clean quarter-second passages at exact pitch
+  instead of the machine gun; automatic smooth mode near 100%), and sound
+  on Windows via pygame.mixer (macaudio.make_output; mock-proven, needs
+  one audible check on a real Windows wheel). Harnesses: tools/
+  dsp_rate_bench.py, dsp_burst_test.py, pygame_output_test.py.
 - OneLibrary converter in the apps: tools/onelibrary_to_pdb.py (tests pass
   incl. the user's real stick; needs sqlcipher3 bundled for Mac + Windows),
   Track Builder button "Make this stick readable on the XDJ-700"; check one

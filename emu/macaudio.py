@@ -48,12 +48,15 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
+import threading
 import time
 import wave
 
 MODE_ADDR = 0x0B6C4264
 MODE_PLAYING = 5
 SAMPLE_RATE = 44100
+_LPCM_FLAGS = (1 << 2) | (1 << 3)     # kAudioFormatFlagIsSignedInteger | packed
 
 TRACK_CKPT = "cache/emu_track_loaded.pkl"
 PROOF_WAV = "/tmp/macaudio_proof.wav"
@@ -227,6 +230,129 @@ def _bind(at):
     at.AudioQueueDispose.argtypes = [ctypes.c_void_p, ctypes.c_bool]
     at.AudioQueueDispose.restype = ctypes.c_int32
     return at
+
+
+# -- portable pull-mode output (2026-10-24) -----------------------------------
+# One factory for the emulator's two live consumers (emu/decksound.py HLE
+# path, emu/dspsound.py real-DSP path): make_output(nfr, fill) calls
+# fill(nfr) -> nfr*4 bytes of s16le stereo at the device's own cadence
+# (~nfr/44100 Hz) and plays it. CoreAudio AudioQueue where present, else
+# pygame.mixer (the Windows app bundles pygame; the shipped mac wheel has
+# no mixer module, so macOS always takes the AudioQueue arm).
+
+OUTPUT_ERROR = ""
+
+
+class AudioQueueOutput:
+    """CoreAudio AudioQueue driven by a fill(nfr)->bytes function."""
+
+    def __init__(self, nfr, fill, sr=SAMPLE_RATE):
+        at = _bind(_audio_toolbox())
+        for fn in ("AudioQueueStart", "AudioQueueStop"):
+            getattr(at, fn).argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            getattr(at, fn).restype = ctypes.c_int32
+        self.at = at
+
+        def cb(user, aq, bufref):
+            data = fill(nfr)
+            b = ctypes.cast(bufref, ctypes.POINTER(_AQB)).contents
+            ctypes.memmove(b.mAudioData, data, nfr * 4)
+            b.mAudioDataByteSize = nfr * 4
+            at.AudioQueueEnqueueBuffer(aq, bufref, 0, None)
+
+        self._cb_keepalive = _CB(cb)
+        asbd = _ASBD(float(sr), 0x6C70636D, _LPCM_FLAGS, 4, 1, 4, 2, 16, 0)
+        q = ctypes.c_void_p()
+        r = at.AudioQueueNewOutput(ctypes.byref(asbd), self._cb_keepalive,
+                                   None, None, None, 0, ctypes.byref(q))
+        if r != 0:
+            raise RuntimeError(f"AudioQueueNewOutput status {r}")
+        self.q = q
+        self.bufs = []
+        for _ in range(3):
+            bref = ctypes.c_void_p()
+            if at.AudioQueueAllocateBuffer(q, nfr * 4,
+                                           ctypes.byref(bref)) != 0:
+                raise RuntimeError("AudioQueueAllocateBuffer status")
+            self.bufs.append(bref)
+            cb(None, q, bref)                # prime all three
+        if at.AudioQueueStart(q, None) != 0:
+            raise RuntimeError("AudioQueueStart status")
+
+    def close(self):
+        try:
+            self.at.AudioQueueStop(self.q, True)
+        except Exception:
+            pass
+
+
+class PygameOutput:
+    """pygame.mixer fallback (Windows): a wall-clock-paced feeder thread
+    builds nfr-frame Sounds at exactly the rate the device plays them,
+    one period ahead, chaining them on a reserved channel. No pygame
+    module dependency outside __init__/thread (the shipped mac wheel has
+    no mixer at all)."""
+
+    def __init__(self, nfr, fill, sr=SAMPLE_RATE):
+        import pygame
+        pygame.mixer.pre_init(sr, -16, 2, 512)
+        if pygame.mixer.get_init() is None:
+            pygame.mixer.init(sr, -16, 2, 512)
+        if pygame.mixer.get_init() is None:
+            raise RuntimeError("pygame.mixer.init produced no device")
+        self._pg = pygame
+        self.nfr, self.sr, self.fill = nfr, sr, fill
+        self.ch = pygame.mixer.Channel(0)
+        self.served_periods = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self._feed, daemon=True)
+        self.thread.start()
+
+    def _feed(self):
+        pg = self._pg
+        period = self.nfr / float(self.sr)
+        next_t = time.time() + period
+        while not self.stop.is_set():
+            now = time.time()
+            wait = next_t - now
+            if wait > 0:
+                self.stop.wait(min(wait, 0.05))
+                continue
+            if next_t < now - 1.0:           # device stalled us: re-anchor
+                next_t = now
+            next_t += period
+            try:
+                snd = pg.mixer.Sound(buffer=self.fill(self.nfr))
+                if self.ch.get_busy():
+                    self.ch.queue(snd)       # chains after the playing one
+                else:
+                    self.ch.play(snd)
+                self.served_periods += 1
+            except Exception:
+                pass                          # one bad period is silence
+
+    def close(self):
+        self.stop.set()
+        try:
+            self._pg.mixer.stop()
+        except Exception:
+            pass
+
+
+def make_output(nfr, fill, sr=SAMPLE_RATE):
+    """Open the platform output for fill(nfr)->bytes. Returns an object
+    with .close(), or None (reason in macaudio.OUTPUT_ERROR)."""
+    global OUTPUT_ERROR
+    tried = []
+    order = ([AudioQueueOutput, PygameOutput] if sys.platform != "win32"
+             else [PygameOutput, AudioQueueOutput])
+    for cls in order:
+        try:
+            return cls(nfr, fill, sr=sr)
+        except Exception as e:
+            tried.append(f"{cls.__name__}: {type(e).__name__}: {e}")
+    OUTPUT_ERROR = "; ".join(tried) or "no backend"
+    return None
 
 
 def coreaudio_probe():

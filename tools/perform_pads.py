@@ -54,7 +54,7 @@ PC0 = RO.CAVE + 0x3600              # 0x081DBF00 (image zero run -> 0x081E03EB)
 PDRAW = PC0 + 0x5E0  # 0x540 -> 0x5C0: swipe code (2026-10-12); -> 0x5E0 stale-latch fix (2026-10-19)
 # 2026-10-17: incremental BJ paint (+~180 B) -> all units from KSSTEP on
 # shifted +0xB0 (cave zero run reaches PC0+0x44EB, still clear).
-KSDRAW = PC0 + 0x11D0                   # KEY SHIFT panel (own unit, calls DRAW)
+KSDRAW = PC0 + 0x11F0                   # KEY SHIFT panel (own unit, calls DRAW)
 PDATA = PC0 + 0x1820
 PMASK = PC0 + 0x1A10                # u8 stem mute mask (bit V/D/B/O) + drawn
 PST = PC0 + 0x1A18                  # +0 latch +1 page +2 mode +4 drawn state
@@ -127,7 +127,10 @@ HC_PREVP = HC_BASE + 8 if HC_NEXTP != SAFE_ZERO else SAFE_ZERO
 RTKEEP = PC0 + 0x10E0                   # per-flush key re-assert (own unit)
                                         # 2026-10-21: +MT watch -> the units
                                         # below moved +0x20/+0x30
-KQTAB = PC0 + 0x1170                    # 13 tagged Q20 words, -6..+6
+KQTAB = PC0 + 0x11B8                    # 13 tagged Q20 words, -6..+6
+                                        # (2026-10-25: +0x20 for rtkeep's
+                                        # stale-jump-bit cleanup)
+PAYDOWN = 0x0B6C7A45                    # PAY+21 bit0: finger on the screen
 KQWORDS = [0x00100000 if s == 0 else 0x40000000 | round(2 ** (s / 12) * (1 << 20))
            for s in range(-6, 7)]
 VKEY = VR.VSCR + 14                 # trailer byte 14: detected key (0 = ?)
@@ -2464,7 +2467,42 @@ hcrd:
 
 
 RTKEEP_SRC = f"""
-rtkeep:                     ; every flush: (1) a MASTER TEMPO change resets
+rtkeep:                     ; every flush: (0) a beat-jump latch left behind
+  mov.l @({PAYDOWN:#x},pc),r1 ; after a tap (the stock hit-tester stops a few
+  mov.b @r1,r0              ; frames after a release, sometimes before its
+  mov.l @({PSW:#x},pc),r3   ; countdown cleared our latch): the jump key bit
+  tst #1,r0                 ; stayed HELD until the next touch (2026-10-25,
+  bt rkup                   ; emulator; tester: SLIP + beat jump felt stuck).
+  mov #0,r0                 ; finger down: the hit-tester owns the latch
+  bra rkjd
+  mov.b r0,@(5,r3)          ; age = 0
+rkup:
+  mov.l @({PST:#x},pc),r1
+  mov.b @r1,r0
+  extu.b r0,r0
+  tst r0,r0
+  bt rkjd
+  mov #15,r2
+  cmp/hs r2,r0              ; >= 15: tab / pending / key codes, not a jump
+  bt rkjd
+  mov.b @(5,r3),r0          ; finger up + jump latch: age it, drop it after
+  add #1,r0                 ; 8 flushes (the hit-tester's own 4-frame
+  mov.b r0,@(5,r3)          ; release hold always runs first)
+  cmp/eq #8,r0
+  bf rkjd
+  mov #0,r0
+  mov.b r0,@r1              ; latch
+  mov.b r0,@(5,r3)
+  mov.b r0,@(4,r3)          ; countdown
+  mov.l @({KEY93:#x},pc),r1
+  mov.b @r1,r0
+  and #127,r0
+  mov.b r0,@r1
+  mov.l @({KEY94:#x},pc),r1
+  mov.b @r1,r0
+  and #251,r0
+  mov.b r0,@r1
+rkjd:                       ; (1) a MASTER TEMPO change resets
   mov.l @({MTW:#x},pc),r1   ; the real-time key to 0 -- arming a key while
   mov.b @r1,r0              ; MT is off and switching MT on froze a deck
   mov.l @({MTLAST:#x},pc),r2  ; (2026-10-21); MTLAST tracks MT per flush

@@ -16,6 +16,9 @@ RAM-only; a power-cycle always returns the deck to stock):
   5c MY SETTINGS rows              (tools/mysettings_apply.py, same gate:
                                      BROWSE > MENU: [MODS] [WAVEFORM]
                                      [BEAT JUMP] [KEY/STEMS])
+  5u UTILITY rows                  (tools/utility_apply.py: the same mod
+                                     rows at the end of hold-MENU UTILITY,
+                                     which scrolls -- all rows on linked decks)
   5f 8 hot cue pages               (tools/hotcue8_apply.py, after the pads)
   5e theme switching               (tools/theme_switch_apply.py: survey,
                                    tables, then the entry word)
@@ -263,6 +266,10 @@ def main():
     r = until_pass(["tools/mysettings_apply.py"], "settings")
     if r is not True:
         sys.exit("STOP: settings install failed - switch the deck off and on, then install again (once).")
+    print("5u  UTILITY rows (hold MENU: MODS, WAVEFORM, BRAKE, GATE, THEME)")
+    r = until_pass(["tools/utility_apply.py"], "utility")
+    if r is not True:
+        sys.exit("STOP: UTILITY rows install failed - switch the deck off and on, then install again (once).")
     if a.no_pads:
         print("5d  PERFORM pads skipped (not selected)")
     else:

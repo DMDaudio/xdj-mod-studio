@@ -75,6 +75,14 @@ def main():
         region("PERFORM pads", base, blob)
     for pool, old, new in MS.hooks():
         hook("MY SETTINGS", pool, new)
+    import utility as UT                  # UTILITY rows (5u)
+    _, us = UT.build()
+    for p_ in UT.POOLS:
+        hook("UTILITY table", p_, us["ut_tab"])
+    hook("UTILITY count", UT.COUNT, UT.STOCK_N + UT.NOURS)
+    ub = UT.image(bytes(mem.r8(us["ut_tab"] + i) for i in range(UT.STOCK_N * UT.REC)))[1]
+    region("UTILITY module", us["ut_head"], ub,
+           skip=range(us["ut_tab"], us["ut_tab"] + (UT.STOCK_N + UT.NOURS) * UT.REC))
     for pool, old, new in PP.hooks():
         if pool == 0x08C92E20:            # flush hook: hot cues -> phase? -> pads
             continue
