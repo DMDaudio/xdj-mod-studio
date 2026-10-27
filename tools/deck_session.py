@@ -346,7 +346,9 @@ def main():
         if r is not True:
             sys.exit("STOP: key shift install failed - power-cycle the deck "
                      "(everything installed before it is fine after a re-run).")
-    if a.no_themes:
+    if os.environ.get("XDJ_LIGHT") != "1":
+        pass                     # light theme held back for 1.0 (XDJ_LIGHT=1)
+    elif a.no_themes:
         print("5l  light add-on skipped (needs theme switching)")
     else:
         # the LIGHT theme's tables rode the normal 5e install; this adds the

@@ -238,6 +238,12 @@ whenever they're needed.
   (screenshots/mockups/light_theme.png) -> needs the firmware's own text
   colours (track name, time, BPM) found and themed; research item.
 
+## v0.99 RELEASED 2026-10-27 (user: "release 0.99 for now, not everything
+## is fixed, everything will be for 1"). Shipped the whole current tree
+## (all 1.0 work so far) with a plain "still to come in 1.0" list. Gates:
+## public_app_test + tester_pack_test PASS. Windows UPD-build fix: no
+## separate commit ever found; Windows zip built fresh by the workflow.
+
 ## 0.99 (tiny, fixes only -- user-agreed 2026-10-26)
 1. Windows UPD-build fix for the tester (he rebuilt the exe; the user says
    the cause is already fixed in our code). OPEN: no commit for it was

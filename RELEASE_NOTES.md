@@ -21,9 +21,7 @@ something below says "still to come", it is not in this version.
   be heard.
 - **Hot cues E–H set on the deck:** pages D–F / G–H play cues made in
   rekordbox; setting them on the deck comes later.
-- **Light theme on the deck:** included as an early preview (pick LIGHT
-  in UTILITY › THEME). It has only been tested in the emulator, not on a
-  real deck yet. Switch the deck off and on to undo it.
+- **Light mode** — for the app and as a deck theme — is saved for 1.0.
 - **Mods file on your USB stick** (the "coming soon" choice in the app).
 - **Emulator:** much faster than 0.9.8 (about 3× while a track plays) but
   still not real time, so sound comes in short bursts.
@@ -39,8 +37,6 @@ something below says "still to come", it is not in this version.
   deck: quick install over the USB cable (nothing flashed), a permanent
   firmware file (UPD), or — coming soon — a mods file on your USB stick.
   Theme Builder, Track Builder and the emulator stay in the top bar.
-- **Light and dark mode** for the app (Settings › Appearance: System,
-  Light or Dark).
 - **Simpler Mods page.** Just tick what to install. Waveform style, theme,
   vinyl brake length and hot cue gate are chosen on the deck (hold MENU ›
   UTILITY).

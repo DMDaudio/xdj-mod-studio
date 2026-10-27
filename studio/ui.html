@@ -640,7 +640,7 @@ dialog h2 { font-size: 16px; margin-bottom: 6px; }
       <div class="row"><button class="btn primary" id="upget" hidden>Download update</button><button class="btn" id="upcheck">Check now</button><button class="btn quiet" id="uppage">Open release page</button></div>
       <div class="small faint">The download goes to your Downloads folder. Quit the app, open the zip and drag the new app over the old one. Your settings, firmware setup and themes are kept.</div>
     </div>
-    <div class="panel stack" style="gap:10px">
+    <div class="panel stack" id="appearpanel" hidden style="gap:10px">
       <div><h2>Appearance</h2><div class="small dim">Light or dark app colours. System follows your computer's setting.</div></div>
       <div class="seg" id="appear"><button data-v="system">System</button><button data-v="light">Light</button><button data-v="dark">Dark</button></div>
     </div>
@@ -730,8 +730,11 @@ function showTab(t) {
 $$('.tabs button').forEach(b => b.onclick = () => showTab(b.dataset.p));
 $$('.mcard[data-go]').forEach(b => b.onclick = () => showTab(b.dataset.go));
 $$('[data-back]').forEach(b => b.onclick = () => showTab('mod'));
-/* appearance: system / light / dark (per computer) */
+/* appearance: system / light / dark (per computer). Held back for 1.0:
+   with LIGHT_UI false the app is always dark and the setting is hidden. */
+const LIGHT_UI = false;
 function applyAppear(v) {
+  if (!LIGHT_UI) v = 'dark';
   try { localStorage.setItem('appear', v); } catch (_) {}
   if (v === 'system') document.documentElement.removeAttribute('data-theme');
   else document.documentElement.setAttribute('data-theme', v);
