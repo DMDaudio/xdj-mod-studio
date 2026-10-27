@@ -201,12 +201,8 @@ snap:                       ; called at overview-cave entry (every overview
   mov #0,r5                 ; private slots -- browsing later reuses the
 hsh:                        ; ANLZ cache for OTHER tracks.
   mov.l @r3+,r0
-  mov r5,r6
-  shll2 r6
-  shll2 r6
-  shll r6
-  add r6,r5                 ; h = h*33 + w
-  add r0,r5
+  shll r5                   ; h = 2h + w (only has to change with the
+  add r0,r5                 ; track; 2026-10-25: bytes for the LINK guard)
   dt r4
   bf hsh
   mov.l @({RO.SNAP_HASH:#x},pc),r3
@@ -234,12 +230,13 @@ sdone:
   rts
   nop
 cp1:                        ; r4 tag, r5 slot, r6 max bytes
+  sts.l pr,@-r15
   mov #0,r0
   mov.l r0,@r5              ; invalidate slot first
   mov.l @({RO.CTX_TAB:#x},pc),r3
-  mov.l @r3,r3
-  tst r3,r3
-  bt c1x
+  bsr c1ok                  ; 2026-10-25 LINK guard: the ANLZ context is
+  mov.l @r3,r3              ; shared with the Pro DJ Link server (a linked
+  bf c1x                    ; deck's track): range-check every pointer
   mov.l @({RO.IDX_OFF:#x},pc),r0
   add r0,r3
   mov.l @r3+,r7
@@ -256,9 +253,9 @@ c1l:
   bra c1l
   add #-1,r7
 c1f:
+  bsr c1ok
   mov.l @(12,r3),r3         ; raw section
-  tst r3,r3
-  bt c1x
+  bf c1x
   mov.l @r3,r0
   cmp/eq r4,r0
   bf c1x
@@ -291,8 +288,18 @@ c1c:
 c1p:
   mov.l r0,@r5              ; publish (tag word)
 c1x:
+  lds.l @r15+,pr
   rts
   nop
+c1ok:                       ; T = r3 is a 4-aligned address in 0x08..0x0F
+  mov r3,r0                 ; (rotate the 2 low bits to the top: unaligned
+  rotr r0                   ; -> huge; then the top 7 bits must be 0b0000001)
+  rotr r0
+  shlr16 r0
+  shlr8 r0
+  shlr r0
+  rts
+  cmp/eq #1,r0
 """
 
 

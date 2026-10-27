@@ -7,7 +7,7 @@ ROOT=$(cd "$(dirname "$0")/../.." && pwd)
 SH=$ROOT/work/sh-tools/bin
 OUT=$ROOT/build/themesw
 BASE=${TS_BASE:-0x09770000}
-DATA=${TS_DATA:-0x09776000}
+DATA=${TS_DATA:-0x09779000}
 MSTNAME=${MSTNAME:?}
 MSTAPP=${MSTAPP:?}
 mkdir -p "$OUT"

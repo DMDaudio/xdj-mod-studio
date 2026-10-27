@@ -95,7 +95,7 @@ UIHTML = os.path.join(BUNDLE, "studio", "ui.html") if FROZEN else os.path.join(H
 
 APP_SUPPORT = app_support_dir()
 # the app's own release number (GitHub release tag v<APP_VERSION>)
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.99"
 RELEASES_API = "https://api.github.com/repos/inter55/xdj-mod-studio/releases/latest"
 RELEASES_PAGE = "https://github.com/inter55/xdj-mod-studio/releases/latest"
 SETTINGS = os.path.join(APP_SUPPORT, "studio.json")
@@ -1207,6 +1207,7 @@ def j_theme_save(log, prog, name, spec):
 # ----------------------------------------------------------------- deck ---
 _DECK = [False]
 _DECK_ERR = [""]
+_DECK_N = [0]               # distinct decks (serials) on USB
 
 
 def _deck_watch():
@@ -1222,12 +1223,29 @@ def _deck_watch():
     while True:
         try:
             # XDJ-700: VID 0x2B73, PID 0x0008, HID usages 1 (shell) / 2
-            _DECK[0] = any(d.get("vendor_id") == PIONEER_VID and
-                           (d.get("product_id") == 0x0008 or d.get("usage") == 0x01)
-                           for d in hid.enumerate())
+            ds = [d for d in hid.enumerate() if d.get("vendor_id") == PIONEER_VID and
+                  (d.get("product_id") == 0x0008 or d.get("usage") == 0x01)]
+            _DECK[0] = bool(ds)
+            _DECK_N[0] = len({d.get("serial_number") or "" for d in ds})
+            # two players on one computer: an install must go to ONE deck
+            _DECK_ERR[0] = (MULTI_DECK if _DECK_N[0] > 1 else "")
         except Exception:
             _DECK[0] = False
+            _DECK_N[0] = 0
         time.sleep(3)
+
+
+MULTI_DECK = ("Two decks are connected. Plug in one deck at a time to install "
+              "(each deck gets its own install).")
+
+
+def deck_ready():
+    """None when an install may start, else the reason it may not"""
+    if not deck_present():
+        return "deck not connected (USB)"
+    if _DECK_N[0] > 1:
+        return MULTI_DECK
+    return None
 
 
 def deck_present():
@@ -1251,12 +1269,11 @@ INSTALL_STEPS = [          # sessions per step (mock-deck measured 2026-10-12)
     ("4/5", "Eject the USB stick from the deck now", 1),
     ("5/5", "Centre waveform", 1),
     ("5b", "Key & stem switching", 1),
-    ("5c", "MY SETTINGS rows", 1),
-    ("5u", "UTILITY rows", 2),
+    ("5u", "UTILITY rows", 1),
     ("5d", "PERFORM pads", 1),
     ("5f", "8 hot cue pages", 1),
     ("5g", "Live stems", 1),
-    ("5h", "FLAC playback", 10),        # first time: 264 KB area check
+    ("5h", "FLAC playback", 5),         # FLAC + Opus: 5 measured 10-25 (FLAC only ~2)
     ("5e", "Theme switching", 4),
     ("5v", "Vinyl brake length", 1),
     ("5m", "Phase meter", 3),                                # survey + 2
@@ -1266,9 +1283,10 @@ SESSION_S = 55.0            # per session incl. 30 s cool-down (mock-deck model)
 
 
 def j_deck_install(log, prog, mode, pads=True,
-                   themes=True, liveks=False, phase=False, brake=0.0, flac=True):
-    if not deck_present():
-        raise RuntimeError("deck not connected (USB)")
+                   themes=True, liveks=False, phase=False, brake=0.0, flac=True,
+                   opus=False):
+    if deck_ready():
+        raise RuntimeError(deck_ready())
     try:
         s = settings()
         s["mods"] = {"mode": mode, "pads": bool(pads), "themes": bool(themes),
@@ -1288,6 +1306,8 @@ def j_deck_install(log, prog, mode, pads=True,
         args.append("--phasemeter")
     if not flac:
         args.append("--no-flac")
+    elif not opus:
+        args.append("--no-opus")             # FLAC only: smaller, faster
     if brake and brake != 1:
         args += ["--brake", f"{brake:g}"]
     plan = {pre: n for pre, _, n in INSTALL_STEPS}
@@ -1305,6 +1325,8 @@ def j_deck_install(log, prog, mode, pads=True,
         plan["5m"] = 0
     if not flac:
         plan["5h"] = 0
+    elif not opus:
+        plan["5h"] = 2
     if not brake or brake == 1:
         plan["5v"] = 0
     order = [pre for pre, _, _ in INSTALL_STEPS]
@@ -1321,8 +1343,15 @@ def j_deck_install(log, prog, mode, pads=True,
         left = cur_left + later
         total = st["done"] + left
         per = (st["work_s"] / st["done"]) if st["done"] >= 3 else SESSION_S
+        eta = left * per
+        # never let the estimate go UP (2026-10-25: 28 -> 29 min mid-FLAC
+        # looked broken): cap it by the last estimate minus the time since
+        now = time.time()
+        if st.get("eta_t"):
+            eta = min(eta, max(0.0, st["eta"] - (now - st["eta_t"])) + 30)
+        st["eta"], st["eta_t"] = eta, now
         prog(st["done"] / max(1, total), None,
-             eta=None if st["waiting"] else left * per,
+             eta=None if st["waiting"] else eta,
              wait=st["waiting"])
 
     def tlog(line):
@@ -1412,7 +1441,34 @@ def j_upd_build(log, prog, upd, mode, pads, versions, banner, extras=()):
     prog(1.0, "Built + boot-tested. Read the warnings before flashing.")
 
 
-UPD_EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift", "utility")
+_FMT_CACHE = {}
+
+
+def lib_formats(root):
+    """{'flac': n, 'opus': n} audio files on the library stick (cached per
+    folder for 60 s) -> the Mods page ticks FLAC only when it's needed and
+    installs Opus only for .opus files. {'flac': None} = no stick."""
+    if not root or not os.path.isdir(root):
+        return {"flac": None, "opus": None}
+    hit = _FMT_CACHE.get(root)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    n = {"flac": 0, "opus": 0}
+    seen = 0
+    for d, dirs, files in os.walk(root):
+        dirs[:] = [x for x in dirs if not x.startswith(".") and x != "PIONEER"]
+        for f in files:
+            ext = f.rsplit(".", 1)[-1].lower() if "." in f else ""
+            if ext in ("flac", "opus"):
+                n[ext] += 1
+            seen += 1
+        if seen > 50000:
+            break
+    _FMT_CACHE[root] = (time.time(), n)
+    return n
+
+
+UPD_EXTRAS = ("centre", "phasemeter", "hotcue8", "stems", "keyshift", "utility")  # utility: always baked (1.0)
 UPD_EXTRA_NAMES = {"centre": "coloured centre waveform",
                    "phasemeter": "phase meter",
                    "hotcue8": "8 hot cues (HOT CUE tab paging)",
@@ -1442,8 +1498,8 @@ BEFORE YOU FLASH
    deck until it says the update is complete.
 
 WHAT IS BAKED IN ({mode} waveform)
-- overview waveform colours, key/stem version switching, MY SETTINGS rows,
-  PERFORM pads (BEAT JUMP / KEY SHIFT / STEMS tabs).
+- overview waveform colours, key/stem version switching, the mod settings
+  in UTILITY (hold MENU), PERFORM pads (BEAT JUMP / KEY SHIFT / STEMS tabs).
 {extras}NOT baked (still installed over USB from the app after each power-on):
 - {usb}.
   Themes and FLAC/Opus are too big for the space the firmware file has.
@@ -1456,19 +1512,19 @@ deck accepts it).
 
 def j_theme_deck(log, prog, name):
     """Install on-deck theme SWITCHING (all saved themes; the deck's
-    MY SETTINGS [THEME] row then steps through them live). Each session
+    UTILITY > THEME row then picks them live). Each session
     writes up to 32 KB and reports what is left; the write step reads the
     whole area first (foreign-data check), so no separate survey."""
-    if not deck_present():
-        raise RuntimeError("deck not connected (USB)")
+    if deck_ready():
+        raise RuntimeError(deck_ready())
     prog(0.0, "sending the themes to the deck", eta=5 * SESSION_S)
     total, t0, runs = None, time.time(), 0
     for i in range(20):
         rc, out = run_tool(log, ["tools/theme_switch_apply.py", "--precheck"])
         runs += 1
         if "RESULT: PASS" in out:
-            log("themes installed: BROWSE > MENU > MY SETTINGS > [THEME] "
-                f"(push to step; {name} is in the list)")
+            log("themes installed: hold MENU > UTILITY > THEME "
+                f"({name} is in the list)")
             prog(1.0, "installed")
             return
         if rc or "FAIL" in out or "REFUSED" in out:
@@ -1576,12 +1632,13 @@ class H(BaseHTTPRequestHandler):
                 return self.send(update_check(force=q.get("force") == "1"))
             if u.path == "/api/state":
                 s = settings()
+                fmts = lib_formats(stick_path())
                 themes = theme_list()
                 return self.send({"stick": stick_path(),
                                   "stick_ok": os.path.isdir(stick_path()),
                                   "project": ROOT,
                                   "project_ok": os.path.isdir(os.path.join(ROOT, "tools")),
-                                  "deck": deck_present(), "deck_err": deck_err(),
+                                  "deck": deck_present(), "deck_err": deck_err(), "deck_multi": _DECK_N[0] > 1,
                                   "demucs": demucs_ok(),
                                   "ffmpeg": bool(shutil.which("ffmpeg") and shutil.which("ffprobe")),
                                   "mods": s.get("mods", {}),
@@ -1591,6 +1648,7 @@ class H(BaseHTTPRequestHandler):
                                   "fw_ready": _fw_ready(),
                                   "surveyed": os.path.exists(os.path.expanduser(
                                       "~/.xdj700_surveys.json")),
+                                  "lib_formats": fmts,
                                   "upd": s.get("upd", "")})
             if u.path == "/api/tracks":
                 return self.send(scan(stick_path()))
@@ -1835,7 +1893,8 @@ class H(BaseHTTPRequestHandler):
                                              bool(b.get("liveks", False)),
                                              bool(b.get("phase", False)),
                                              float(b.get("brake") or 0),
-                                             bool(b.get("flac", True)))})
+                                             bool(b.get("flac", False)),
+                                             bool(b.get("opus", False)))})
         except (BrokenPipeError, ConnectionResetError):
             raise
         except Exception as e:

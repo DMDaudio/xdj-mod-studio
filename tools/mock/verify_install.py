@@ -70,11 +70,8 @@ def main():
             break
     else:
         print("  ok   versions code")
-    region("MY SETTINGS rows", MS.MS, MS.image())
     for base, blob in PP.blobs():
         region("PERFORM pads", base, blob)
-    for pool, old, new in MS.hooks():
-        hook("MY SETTINGS", pool, new)
     import utility as UT                  # UTILITY rows (5u)
     _, us = UT.build()
     for p_ in UT.POOLS:

@@ -13,7 +13,8 @@ RAM-only; a power-cycle always returns the deck to stock):
                                      until PASS; refuses if a track is
                                      loaded)
   5b stems version switching (tools/vredirect_apply.py, same gate)
-  5c MY SETTINGS rows              (tools/mysettings_apply.py, same gate:
+  (5c MY SETTINGS rows: retired in 1.0, UTILITY has them all)
+  .. (old)                          (tools/mysettings_apply.py, same gate:
                                      BROWSE > MENU: [MODS] [WAVEFORM]
                                      [BEAT JUMP] [KEY/STEMS])
   5u UTILITY rows                  (tools/utility_apply.py: the same mod
@@ -148,6 +149,8 @@ def main():
                     help="skip 5f (8 hot cue pages)")
     ap.add_argument("--no-stems", action="store_true",
                     help="skip 5g (live stems)")
+    ap.add_argument("--no-opus", action="store_true",
+                    help="FLAC only in 5h (no Ogg Opus decoder): much shorter")
     ap.add_argument("--no-flac", action="store_true",
                     help="skip 5h (FLAC playback)")
     ap.add_argument("--no-themes", action="store_true",
@@ -262,10 +265,9 @@ def main():
     r = until_pass(["tools/vredirect_apply.py"], "versions")
     if r is not True:
         sys.exit("STOP: version-switch install failed - switch the deck off and on, then install again (once).")
-    print("5c  MY SETTINGS rows")
-    r = until_pass(["tools/mysettings_apply.py"], "settings")
-    if r is not True:
-        sys.exit("STOP: settings install failed - switch the deck off and on, then install again (once).")
+    # 1.0: no MY SETTINGS rows any more -- every mod setting lives in the
+    # stock UTILITY list (5u); its state bytes are the same RAM (zero on a
+    # fresh deck = mods on, stock brake, gate off)
     print("5u  UTILITY rows (hold MENU: MODS, WAVEFORM, BRAKE, GATE, THEME)")
     r = until_pass(["tools/utility_apply.py"], "utility")
     if r is not True:
@@ -295,7 +297,7 @@ def main():
     if a.no_themes:
         print("5e  theme switching skipped (not selected)")
     else:
-        print("5e  theme switching (MY SETTINGS [THEME])")
+        print("5e  theme switching (UTILITY > THEME)")
         r = until_pass(["tools/theme_switch_apply.py", "--precheck"], "themes")
         if r is not True:
             sys.exit("STOP: theme install failed - switch the deck off and on, then install again (once).")
@@ -303,7 +305,7 @@ def main():
         print("5h  FLAC skipped (not selected)")
     else:
         print("5h  FLAC playback (keep the USB stick OUT until the end)")
-        r = until_pass(["tools/flac_apply.py"], "flac")
+        r = until_pass(["tools/flac_apply.py"] + (["--no-opus"] if a.no_opus else []), "flac")
         if r is not True:
             sys.exit("STOP: FLAC install failed - switch the deck off and on, then install again (once).")
     if not a.brake or a.brake == 1:
@@ -344,10 +346,26 @@ def main():
         if r is not True:
             sys.exit("STOP: key shift install failed - power-cycle the deck "
                      "(everything installed before it is fine after a re-run).")
+    if a.no_themes:
+        print("5l  light add-on skipped (needs theme switching)")
+    else:
+        # the LIGHT theme's tables rode the normal 5e install; this adds the
+        # rest of the screen (text ink, waveform window, clear fills) and
+        # arms the pads' + phase meter's light palettes when they are in
+        print("5l  light add-on (UTILITY > THEME > LIGHT)")
+        out = run(["tools/lighttext_apply.py", "--survey"])
+        if "SURVEY OK" not in out:
+            print("    light area not empty on this deck - skipped "
+                  "(everything else is installed)")
+        else:
+            r = until_pass(["tools/lighttext_apply.py"], "light")
+            if r is not True:
+                sys.exit("STOP: light add-on install failed - switch the "
+                         "deck off and on, then install again (once).")
     print(f"DONE in {(time.time() - t0) / 60:.0f} min: insert the stick and "
           f"load a track. Waveform = {a.mode}; PERFORM has BEAT JUMP / "
-          f"HOT CUE / KEY SHIFT / STEMS; BROWSE > MENU > MY SETTINGS has "
-          f"the mod rows.")
+          f"HOT CUE / KEY SHIFT / STEMS; hold MENU > UTILITY (scroll to "
+          f"the end) has the mod settings.")
     print("If the stick was in the deck at any point during the install: "
           "eject it and put it back once, so the deck re-reads the file "
           "types (otherwise FLAC/Opus files still show 'unsupported').")

@@ -55,7 +55,13 @@ def snapshot_state(m):
     for name in ("reg", "rx", "tx_log", "pending", "cyc", "tmu", "tstr",
                  "imr", "cmstr", "cmcsr", "cmcnt", "cmcor", "cm_acc", "dma",
                  "fb_base", "cs6", "dspmem"):
-        s["d_" + name] = pickle.dumps(getattr(dev, name, None))
+        v = getattr(dev, name, None)
+        if name == "dma" and v is not None:      # plain values (the C core
+            v = {b: {"dmaor": int(x["dmaor"]),   # may back these with views)
+                     "ch": {c: {k: int(st[k]) for k in st}
+                            for c, st in x["ch"].items()}}
+                 for b, x in v.items()}
+        s["d_" + name] = pickle.dumps(v)
     if getattr(dev, "tdg", None):
         s["d_tdg"] = pickle.dumps(dev.tdg.state())
     return s

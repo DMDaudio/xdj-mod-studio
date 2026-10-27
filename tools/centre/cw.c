@@ -41,21 +41,29 @@ u32 cw_calls;
 static u32 be32(const u8 *p) { return (u32)p[0] << 24 | p[1] << 16 | p[2] << 8 | p[3]; }
 
 /* copy the loaded track's PWV7 section into SLOT7 (tag word last) */
+/* 2026-10-25 LINK guard: the ANLZ context is shared with the Pro DJ Link
+ * server (a linked deck loading a track from this deck's stick) -- every
+ * pointer is checked to be 4-aligned RAM before it is read */
+static int ok_ptr(u32 a, u32 len)
+{
+    return !(a & 3) && a >= 0x08000000u && a < 0x10000000u && len <= 0x10000000u - a;
+}
+
 static void snap7(void)
 {
     R32(SLOT7) = 0;
     k7 = 0;
     u32 ctx = R32(CTX_TAB);
-    if (!ctx) return;
+    if (!ok_ptr(ctx, IDX_OFF + 4 + 16 * 32)) return;
     u32 idx = ctx + IDX_OFF, n = R32(idx);
     if (n > 32) return;
     for (u32 i = 0; i < n; i++) {
         u32 e = idx + 4 + 16 * i;
         if (R32(e + 4) != TAG_PWV7) continue;
         const u8 *sec = (const u8 *)R32(e + 12);
-        if (!sec || R32((u32)sec) != TAG_PWV7) return;
+        if (!ok_ptr((u32)sec, 24) || R32((u32)sec) != TAG_PWV7) return;
         u32 len = be32(sec + 8);
-        if (len > SLOT7_MAX || len < 24) return;
+        if (len > SLOT7_MAX || len < 24 || !ok_ptr((u32)sec, len)) return;
         u32 *d = (u32 *)SLOT7;
         const u32 *s = (const u32 *)sec;
         for (u32 w = 1; w < (len + 3) / 4; w++) d[w] = s[w];

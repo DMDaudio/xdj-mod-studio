@@ -149,7 +149,18 @@ typedef struct {
     int splx_irq; u32 splx_after;
     u32 idle_head, idle_lo, idle_hi; int idle_armed, idle_dirty; u32 idle_r[64];
     u32 wlo, whi; int wn; u32 wpc[256], wad[256], wv[256]; u64 wcy[256];
+    /* delay-loop fast-forward (see dff_* below) */
+    int dff_on, dff_nt, dff_learn;
+    u64 dff_hits, dff_cycles;
+    struct { s32 n; u64 T, dep, dins; SPLoop sp; } dff_t[4];
+    struct { s32 n; u32 r[64], c[C_NCTRL], b3, sp; u64 cyc, ep, ins, ints, py; } dff_pre;
+    /* frozen call in progress (interrupts off): entry state for settle() */
+    int dff_frozen, dff_fk, dff_replay;
+    u64 dff_end;
+    struct { u32 r[64], word; u64 cyc, ep, ins; int hint, prevep, lastf, idle_dirty; SPLoop sp; } dff_in;
 } Core;
+
+#define DFF_PC 0xC004BEE0u     /* delay routine (see dff_enter) */
 
 /* ================================================== code table ======== */
 static inline u32 hslot(Core *c, u32 a)
@@ -220,8 +231,10 @@ int c6x_add_code(Core *c, const Ins *v, int n)
     return c->nins;
 }
 
+void c6x_settle(Core *c);
 void c6x_drop_code(Core *c, u32 lo, u32 hi)
 {
+    if (lo < DFF_PC + 0x58u && hi > DFF_PC) { c6x_settle(c); c->dff_nt = 0; c->dff_learn = 0; }
     int w = 0;
     for (int i = 0; i < c->nins; i++)
         if (!(c->ins[i].addr >= lo && c->ins[i].addr < hi))
@@ -231,7 +244,7 @@ void c6x_drop_code(Core *c, u32 lo, u32 hi)
     ep_flush(c);
 }
 
-void c6x_clear_code(Core *c) { c->nins = 0; rehash(c); ep_flush(c); }
+void c6x_clear_code(Core *c) { c->dff_nt = 0; c->dff_learn = 0; c->dff_frozen = 0; c->nins = 0; rehash(c); ep_flush(c); }
 
 /* ================================================== memory ============ */
 void c6x_set_cb(Core *c, mmio_rd_t r, mmio_wr_t w, pyop_t p, pyld_t l)
@@ -338,6 +351,10 @@ void c6x_ldpy(Core *c, u64 issue, u32 a, int n, u32 id)
     ev_mem(c, issue + 3);
 }
 void c6x_stop(Core *c) { c->status = ST_STOP; }
+/* device models raise / clear interrupt flags atomically (play mode runs
+ * them on another thread than the core) */
+void c6x_ifr_or(Core *c, u32 m) { __atomic_fetch_or(&c->c[C_IFR], m, __ATOMIC_SEQ_CST); }
+void c6x_ifr_and(Core *c, u32 m) { __atomic_fetch_and(&c->c[C_IFR], m, __ATOMIC_SEQ_CST); }
 
 static void ctrl_set(Core *c, int i, u32 v)
 {
@@ -491,8 +508,10 @@ static inline ALWAYS int exec1(Core *c, const Ins *i, u64 cyc)
     case O_mvc_to: {
         u32 v = c->r[i->ra];
         if (i->ctrl == C_ILC || i->ctrl == C_RILC) wrc(c, cyc + 3, i->ctrl, v);
-        else if (i->ctrl == C_ICR) c->c[C_IFR] &= ~v;
-        else if (i->ctrl == C_ISR) c->c[C_IFR] |= v;
+        /* IFR is also set by the device models (another thread in play
+         * mode): read-modify-writes of it are atomic everywhere */
+        else if (i->ctrl == C_ICR) __atomic_fetch_and(&c->c[C_IFR], ~v, __ATOMIC_SEQ_CST);
+        else if (i->ctrl == C_ISR) __atomic_fetch_or(&c->c[C_IFR], v, __ATOMIC_SEQ_CST);
         else wrc(c, cyc, i->ctrl, v);
         return 0;
     }
@@ -927,7 +946,7 @@ static int take_interrupt(Core *c)
     u32 p = r[C_IFR] & r[C_IER] & 0xFFF0;
     if (!p) return 0;
     int n = __builtin_ctz(p);
-    r[C_IFR] &= ~(1u << n);
+    __atomic_fetch_and(&r[C_IFR], ~(1u << n), __ATOMIC_SEQ_CST);
     r[C_IRP] = c->pc;
     r[C_CSR] = (r[C_CSR] & ~3u) | ((r[C_CSR] & 1) << 1);
     r[C_ITSR] = r[C_TSR];
@@ -1018,6 +1037,198 @@ static int step(Core *c)
     return c->status ? -1 : 0;
 }
 
+
+/* ============================================ delay-loop fast-forward ==
+ * Pioneer's DSP program spends ~30 % of its working cycles in one busy-
+ * wait routine at 0xC004BEE0 (measured on the playing snapshot; every call
+ * is delay(1000)): `for (volatile int i = 0; i < n; i++);` as an SPLOOPW,
+ * 14 cycles per count. It touches nothing but a1/a3/a0, b0/b4/b5/b6 and
+ * its stack word at b15-4, so a whole call can be replaced by its exact
+ * end state when nothing else can happen meanwhile:
+ *   - entered at a clean packet boundary (no stall, nothing in flight, no
+ *     SPLOOP, no pending branch);
+ *   - no interrupt deliverable now -- and none can become deliverable
+ *     before the run slice ends: IFR only changes between c6x_run calls
+ *     (Python raises events there) or by the DSP's own MVC/MMIO writes,
+ *     which this routine does not make;
+ *   - the whole call fits in the slice's remaining cycles.
+ * The first call with a given n is LEARNED by running it normally; it is
+ * accepted only if the code bytes are the expected routine, no interrupt /
+ * Python op happened, every register outside the written set is unchanged,
+ * the written set and the stack word equal the closed form, and control
+ * registers are unchanged. The cycle count, statistics and the finished
+ * SPLOOP state are recorded and replayed verbatim. A mismatch disables
+ * the shortcut for good. c6x_set_dff(c, 0) turns it off (XDJ_DSP_DFF=0). */
+static const u32 DFF_SIG[22] = {
+    0x07BF005Au, 0xBC450627u, 0x6C6EBC4Du, 0x28679E28u, 0xD028A120u, 0x2683E000u,
+    0x00010000u, 0xE1C00080u, 0x00000000u, 0x22BC22E6u, 0x2CE62C6Eu, 0x0C6ED247u,
+    0xAC3536B0u, 0x6C6EBC4Du, 0x02188AFAu, 0xE7800020u, 0x2C6E0247u, 0x00000000u,
+    0x00034000u, 0x00000000u, 0x07BD005Au, 0x008CA362u };
+enum { RA0 = 0, RA3 = 3, RB0 = 32, RB3 = 35, RB4 = 36, RB5 = 37, RB6 = 38, RB15 = 47 };
+
+void c6x_set_dff(Core *c, int on) { c->dff_on = on; c->dff_nt = 0; c->dff_learn = 0; }
+/* 0 calls replayed, 1 cycles replayed, 2 on | learned << 8 | learning << 16 */
+u64 c6x_dff_stat(Core *c, int k)
+{
+    switch (k) {
+    case 0: return c->dff_hits;
+    case 1: return c->dff_cycles;
+    default: return (u64)c->dff_on | (u64)c->dff_nt << 8 | (u64)c->dff_learn << 16;
+    }
+}
+
+static int dff_sig_ok(Core *c)
+{
+    uint8_t *p = ram(c, DFF_PC, sizeof DFF_SIG);
+    return p && !memcmp(p, DFF_SIG, sizeof DFF_SIG);
+}
+
+static inline int dff_clean(Core *c)
+{
+    return !c->stall && !c->sp_on && !c->splx_irq && !c->evcount && !c->npend &&
+           !(c->wlo < c->whi) && !c->c[C_AMR] && !(c->c[C_TSR] & SPLX);
+}
+
+static inline int dff_int_possible(Core *c)
+{
+    u32 *r = c->c;
+    return (r[C_CSR] & 1) && (r[C_IER] & 2) && (r[C_IFR] & r[C_IER] & 0xFFF0);
+}
+
+/* the recorded end state of call k (registers, stack word, SPLOOP state,
+ * statistics, pc); cycle already at the end */
+static void dff_finish(Core *c, int k, u32 sp)
+{
+    s32 n = c->dff_t[k].n;
+    u32 a = sp - 4;
+    uint8_t *p = ram(c, a, 4);
+    /* the routine's stores (0, 1, .., n at b15-4) through mwrite's idle
+     * rule: they change memory, so outside the idle stack they dirty */
+    u32 g = (a >= 0x00800000u && a < 0x00840000u) ? a + 0x11000000u : a;
+    if (!c->idle_dirty && (g < c->idle_lo || g >= c->idle_hi)) c->idle_dirty = 1;
+    u32 v = (u32)n; memcpy(p, &v, 4);
+    c->r[RA0] = 1; c->r[RA3] = (u32)n; c->r[RB0] = 0; c->r[RB4] = 0;
+    c->r[RB5] = (u32)(n - 1); c->r[RB6] = (u32)n;
+    c->sp = c->dff_t[k].sp;
+    c->ep_count += c->dff_t[k].dep; c->insn_count += c->dff_t[k].dins;
+    c->pc = c->r[RB3];
+    c->hint = -1; c->prevep = -1;
+    c->dff_hits++; c->dff_cycles += c->dff_t[k].T;
+}
+
+/* at a packet boundary with pc == DFF_PC: replay a learned call or start
+ * learning one. Returns cycles consumed now (0 = run normally, or the call
+ * is frozen and c6x_run counts its cycles down). */
+static u64 dff_enter(Core *c, s64 budget)
+{
+    s32 n = (s32)c->r[4];
+    if (c->dff_replay || n < 2 || n > 0x01000000 || !dff_clean(c) || dff_int_possible(c))
+        return 0;
+    for (int k = 0; k < c->dff_nt; k++) {
+        if (c->dff_t[k].n != n) continue;
+        u64 T = c->dff_t[k].T;
+        u32 sp = c->r[RB15];
+        uint8_t *p = ram(c, sp - 4, 4);
+        if (!p) return 0;
+        if ((s64)T <= budget) {                 /* whole call now */
+            c->cycle += T;
+            dff_finish(c, k, sp);
+            return T;
+        }
+        if (c->c[C_CSR] & 1) return 0;          /* interruptible: run it */
+        /* interrupts are off (GIE = 0): nothing outside can change the
+         * call's course, so it is FROZEN: the cycles are counted down by
+         * c6x_run and the end state applied at its exact cycle. Anything
+         * that looks inside meanwhile goes through c6x_settle(), which
+         * re-runs the call from this entry state to the current cycle. */
+        memcpy(c->dff_in.r, c->r, sizeof c->r);
+        memcpy(&c->dff_in.word, p, 4);
+        c->dff_in.cyc = c->cycle; c->dff_in.ep = c->ep_count; c->dff_in.ins = c->insn_count;
+        c->dff_in.hint = c->hint; c->dff_in.prevep = c->prevep; c->dff_in.lastf = c->lastf;
+        c->dff_in.idle_dirty = c->idle_dirty;
+        c->dff_in.sp = c->sp;
+        c->dff_frozen = 1; c->dff_fk = k; c->dff_end = c->cycle + T;
+        return 0;
+    }
+    if (c->dff_nt >= 4 || c->dff_learn || !dff_sig_ok(c)) return 0;
+    c->dff_learn = 1;
+    c->dff_pre.n = n;
+    memcpy(c->dff_pre.r, c->r, sizeof c->r);
+    memcpy(c->dff_pre.c, c->c, sizeof c->c);
+    c->dff_pre.b3 = c->r[RB3]; c->dff_pre.sp = c->r[RB15];
+    c->dff_pre.cyc = c->cycle; c->dff_pre.ep = c->ep_count; c->dff_pre.ins = c->insn_count;
+    c->dff_pre.ints = c->interrupts; c->dff_pre.py = c->py_calls;
+    return 0;
+}
+
+s64 c6x_run(Core *c, s64 n);
+
+/* frozen call: make the visible state exactly what running it would have
+ * produced by now (restore the entry state, run the elapsed cycles with
+ * the shortcut held off). Cheap no-op when nothing is frozen. */
+void c6x_settle(Core *c)
+{
+    if (!c->dff_frozen) return;
+    u64 now = c->cycle;
+    c->dff_frozen = 0;
+    memcpy(c->r, c->dff_in.r, sizeof c->r);
+    uint8_t *p = ram(c, c->dff_in.r[RB15] - 4, 4);
+    memcpy(p, &c->dff_in.word, 4);
+    c->cycle = c->dff_in.cyc; c->ep_count = c->dff_in.ep; c->insn_count = c->dff_in.ins;
+    c->hint = c->dff_in.hint; c->prevep = c->dff_in.prevep; c->lastf = c->dff_in.lastf;
+    c->idle_dirty = c->dff_in.idle_dirty;
+    c->sp = c->dff_in.sp;
+    c->pc = DFF_PC;
+    int st = c->status;
+    c->dff_replay = 1;
+    while (c->cycle < now) {
+        s64 k = c6x_run(c, (s64)(now - c->cycle));
+        if (k <= 0 || c->status != ST_OK) break;      /* cannot happen: learned code */
+    }
+    c->dff_replay = 0;
+    c->status = st;
+}
+
+int c6x_dff_frozen(Core *c) { return c->dff_frozen; }
+
+/* learning: called at every packet boundary while dff_learn is set */
+static void dff_check_learn(Core *c)
+{
+    if (c->pc != c->dff_pre.b3 || c->sp_on || c->stall) {
+        if (c->cycle - c->dff_pre.cyc > 50000000ull) c->dff_learn = 0;   /* lost it */
+        return;
+    }
+    c->dff_learn = 0;
+    if (!dff_clean(c) || c->interrupts != c->dff_pre.ints || c->py_calls != c->dff_pre.py)
+        return;                                    /* disturbed: try again later */
+    s32 n = c->dff_pre.n;
+    int ok = 1;
+    for (int i = 0; i < 64; i++) {
+        u32 want;
+        switch (i) {
+        case RA0: want = 1; break;
+        case RA3: want = (u32)n; break;
+        case RB0: want = 0; break;
+        case RB4: want = 0; break;
+        case RB5: want = (u32)(n - 1); break;
+        case RB6: want = (u32)n; break;
+        default: want = c->dff_pre.r[i];
+        }
+        if (c->r[i] != want) ok = 0;
+    }
+    if (memcmp(c->c, c->dff_pre.c, sizeof c->c)) ok = 0;
+    uint8_t *p = ram(c, c->dff_pre.sp - 4, 4);
+    u32 v = 0; if (p) memcpy(&v, p, 4);
+    if (!p || v != (u32)n) ok = 0;
+    if (!ok) { c->dff_on = 0; return; }           /* not the routine we know */
+    int k = c->dff_nt++;
+    c->dff_t[k].n = n;
+    c->dff_t[k].T = c->cycle - c->dff_pre.cyc;
+    c->dff_t[k].dep = c->ep_count - c->dff_pre.ep;
+    c->dff_t[k].dins = c->insn_count - c->dff_pre.ins;
+    c->dff_t[k].sp = c->sp;
+}
+
 /* run up to n cycles; returns cycles completed; c6x_status() says why */
 s64 c6x_run(Core *c, s64 n)
 {
@@ -1064,6 +1275,25 @@ s64 c6x_run(Core *c, s64 n)
             k++;
             continue;
         }
+        if (c->dff_frozen) {                    /* counting a frozen call down */
+            u64 left = c->dff_end - c->cycle;
+            s64 adv = (s64)left < n - k ? (s64)left : n - k;
+            c->cycle += (u64)adv;
+            k += adv;
+            if (c->cycle == c->dff_end) {
+                c->dff_frozen = 0;
+                dff_finish(c, c->dff_fk, c->dff_in.r[RB15]);
+            }
+            continue;
+        }
+        if (c->dff_on && !c->dff_replay) {
+            if (c->dff_learn) dff_check_learn(c);
+            else if (c->pc == DFF_PC) {
+                u64 t = dff_enter(c, n - k);
+                if (t) { k += (s64)t; continue; }
+                if (c->dff_frozen) continue;
+            }
+        }
         if (step(c) < 0) {
             if (c->status == ST_STOP) k++;      /* that cycle completed */
             break;
@@ -1078,9 +1308,9 @@ u32 c6x_need(Core *c) { return c->need; }
 int c6x_err(Core *c) { return c->err; }
 u32 c6x_err_pc(Core *c) { return c->err_pc; }
 u32 c6x_pc(Core *c) { return c->pc; }
-void c6x_set_pc(Core *c, u32 pc) { c->pc = pc; }
+void c6x_set_pc(Core *c, u32 pc) { c->dff_frozen = 0; c->dff_learn = 0; c->pc = pc; }
 u64 c6x_cycle(Core *c) { return c->cycle; }
-void c6x_set_cycle(Core *c, u64 v) { c->cycle = v; }
+void c6x_set_cycle(Core *c, u64 v) { c->dff_frozen = 0; c->dff_learn = 0; c->cycle = v; }
 int c6x_stall(Core *c) { return c->stall; }
 int c6x_evcount(Core *c) { return c->evcount; }
 int c6x_npend(Core *c) { return c->npend; }

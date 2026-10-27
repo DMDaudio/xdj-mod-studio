@@ -1,4 +1,4 @@
-# XDJ Mod Studio v0.9 (XDJ-700, firmware 1.15)
+# XDJ Mod Studio v0.99 (XDJ-700, firmware 1.15)
 
 Open-source mods for the Pioneer DJ XDJ-700, loaded into the deck's memory
 over USB. Nothing is flashed: **switch the deck off and on and it is stock
@@ -7,6 +7,76 @@ DJ's support site); the app checks it and builds everything from it.
 
 Apple Silicon Mac, macOS 14 or newer (Windows build: see the README inside
 the Windows zip). First launch: right-click the app → Open.
+
+## About 0.99 — please read
+**0.99 is a stepping stone, not the finished 1.0.** It brings every fix
+that is ready today, but not everything on the list is fixed yet. The
+rest comes in **1.0**, and 1.0 is where everything will be fixed. If
+something below says "still to come", it is not in this version.
+
+**Still to come in 1.0 (not in 0.99):**
+- **Phase meter, master row:** on linked decks the top (orange) row
+  stays empty. Your own deck's row works.
+- **Faster stem mute:** muting a stem can still take a few seconds to
+  be heard.
+- **Hot cues E–H set on the deck:** pages D–F / G–H play cues made in
+  rekordbox; setting them on the deck comes later.
+- **Light theme on the deck:** included as an early preview (pick LIGHT
+  in UTILITY › THEME). It has only been tested in the emulator, not on a
+  real deck yet. Switch the deck off and on to undo it.
+- **Mods file on your USB stick** (the "coming soon" choice in the app).
+- **Emulator:** much faster than 0.9.8 (about 3× while a track plays) but
+  still not real time, so sound comes in short bursts.
+- **Windows** stays a beta.
+- Live key shift stays beta and off by default.
+
+## What changed in 0.99
+- **Emulator about 3× faster while playing** (the audio chip now runs on
+  its own processor core, and much more of the deck's hardware is
+  emulated directly instead of through slower code). Mod testing still
+  uses the exact, slower mode.
+- **New app layout.** Home → **Mod** → pick how the mods get onto your
+  deck: quick install over the USB cable (nothing flashed), a permanent
+  firmware file (UPD), or — coming soon — a mods file on your USB stick.
+  Theme Builder, Track Builder and the emulator stay in the top bar.
+- **Light and dark mode** for the app (Settings › Appearance: System,
+  Light or Dark).
+- **Simpler Mods page.** Just tick what to install. Waveform style, theme,
+  vinyl brake length and hot cue gate are chosen on the deck (hold MENU ›
+  UTILITY).
+- **FLAC no longer freezes the deck.** Two bugs: the FLAC decoder needed
+  more working memory than the deck's track-loading task has (it now runs
+  on its own), and hi-res FLAC (88.2–192 kHz) was handed raw to the deck.
+  Hi-res FLAC now plays (converted to 44.1/48 kHz, which is what the
+  XDJ-700 plays), and any FLAC that still can't play shows as unplayable
+  instead of freezing. Verified in the emulator with the real audio chip.
+- **FLAC is only installed when you need it** — ticked automatically when
+  your stick has .flac files — and the Opus decoder only when it has .opus
+  files: a FLAC-only install is about 3× smaller and much faster.
+- **Phase meter fixed:** it read the track *length* instead of the
+  position on real decks (beats stood still); it now reads the live
+  position (measured on a real deck), shows on the PERFORM screen too,
+  keeps the stock "Bars" meter from painting over it when a linked deck
+  is master, and stays out of the MENU popup.
+- **Linked decks: a freeze fixed.** With a second deck playing a track
+  from this deck's stick over Pro DJ Link, the phase meter could read
+  track data while the link was rewriting it and freeze the deck. All mods
+  that read that data (phase meter, colour waveforms, 8 hot cues) now
+  check it first. Tested on two linked decks: no freeze.
+- **Live key shift v3:** fixes two bugs that put a buzz on the sound
+  while shifted (it misread the samples just before each block and could
+  read past the valid ones) — the likely cause of the right-channel noise
+  on AIFF tracks. Still beta and off by default.
+- **Faster, honest install:** the time estimate only counts down.
+- **Two decks on one computer:** the installer now talks to exactly one
+  deck and refuses to start with two connected (before, an install could
+  end up split across both players). Plug in one deck at a time.
+- **"Waveform colours only" UPD preset** now includes the big centre
+  waveform too.
+- **All mod settings now live in UTILITY** (hold MENU, scroll to the end):
+  MODS, WAVEFORM COLOR, VINYL BRAKE LENGTH, HOT CUE GATE, THEME. The
+  BROWSE › MENU › MY SETTINGS popup is stock again — it only held 7 rows,
+  so on a linked deck one mod row always went missing.
 
 ## What changed in 0.9.8
 - **Phase meter on the PERFORM screen too.** It used to show only on the
@@ -53,7 +123,7 @@ the Windows zip). First launch: right-click the app → Open.
   minutes. Untick it on the Mods page and add it later.
 - **Permanent (UPD) file presets** — "Phase meter only" and "Waveform
   colours only" one-click presets next to the tick boxes.
-- If colours or the phase meter look gone after a trip through MY SETTINGS:
+- (0.9.6 note, MY SETTINGS rows since replaced by UTILITY) If colours or the phase meter look gone after a trip through MY SETTINGS:
   check [WAVEFORM] is not BLUE and [MODS] is ON in that menu — those rows
   switch them off.
 
@@ -63,7 +133,7 @@ the Windows zip). First launch: right-click the app → Open.
 - **Live key shift** — PERFORM › KEY SHIFT moves the key up or down while
   the track plays (MASTER TEMPO on); tempo stays put and the panel shows
   the track's real key.
-- **Live themes** — step through colour themes from MY SETTINGS; OFF
+- **Live themes** — pick colour themes on the deck (UTILITY › THEME); OFF
   brings back the exact stock look.
 - **Live stems** — mute vocals / drums / bass / other from PERFORM ›
   STEMS. A mute is heard after about 30 seconds.
@@ -81,15 +151,17 @@ on a real deck too, but nobody has tried them on one yet:
 - **Phase meter with the live position source** — this deck's beats and
   downbeats above the waveform, main screen and PERFORM (the 0.9.5 build's beats stood still on a
   deck; this one reads the clock's own word).
-- **Vinyl brake length** — MY SETTINGS › [VINYL BRAKE], 0.5× to 15×.
+- **Vinyl brake length** — UTILITY › VINYL BRAKE LENGTH, 0.5× to 15×.
 - **8 hot cues** — A–H, in pages of three (swipe or tap the tab).
 - **FLAC and Opus** playback.
 
 ## Known issues
-- **Live key shift (beta, off by default):** one tester's deck freezes
-  with "file corrupted" when the key changes; it works on our deck and in
-  the emulator (MP3 and WAV, ±6 semitones), so we're still hunting the
-  difference. Leave it unticked if you play live.
+- **Live key shift (beta, off by default):** v3 fixes the buzz found in
+  the code, but it hasn't been heard on a deck yet, and one tester's
+  "freeze + file corrupted" report is still being looked into. Leave it
+  unticked if you play live.
+- **Not yet confirmed on a real deck:** the FLAC fix, the phase meter's
+  stock-meter fix with a linked master, key shift v3.
 - The emulator's audio stutters (the emulated audio chip runs slower than
   real time). Browsing, loading and the screens are fine.
 - Stems need PWV6/PWV7 waveform data in the track's .EXT (rekordbox's

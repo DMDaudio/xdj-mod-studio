@@ -26,7 +26,9 @@
 #define DR_FLAC_NO_OGG
 #define DR_FLAC_NO_SIMD
 #define DR_FLAC_NO_WCHAR
-#define DR_FLAC_NO_CRC
+/* CRC on: with DR_FLAC_NO_CRC dr_flac also drops its BINARY-SEARCH seek, so a
+ * file without a SEEKTABLE fell back to brute force (skim frame by frame)
+ * -- 2026-10-25 deck: skipping in a 96 kHz FLAC stalled -> emergency loop */
 #define DR_FLAC_IMPLEMENTATION
 #include <stddef.h>
 #include <string.h>
@@ -52,7 +54,8 @@ uintptr_t o_fread = 0x08C61A6C, o_seek = 0x08C62E1C, o_tell = 0x08C632F2,
     vf_direct_prev = 0x08C61A6C;   /* live direct-read slot before us (live
                                       stems engine, else stock fread) */
 u32 vf_stats[8];                  /* 0 probes, 1 flac opens, 2 vreads, 3 decodes,
-                                     4 opus opens, 5 opus seeks, 6 opus packets */
+                                     4 opus opens, 5 opus seeks, 6 opus packets,
+                                     7 unplayable FLACs served empty */
 /* op log ring (diagnostics): {op, fp, a, b, ret} x 64; op 1 read 2 seek
  * 3 tell 4 eof 5 size 6 close 7 direct-read */
 u32 vf_log[64 * 5], vf_logi;
@@ -92,6 +95,7 @@ typedef struct {
     int pcm_start;                /* its first output frame (may be < 0) */
     u32 pcm_n;
 #endif
+    u8 dec;                       /* 1, or 2/4 for hi-res (88.2..192 kHz) */
     u32 cache_frame, cache_n, next_frame;
     unsigned char *base;
     size_t used;
@@ -100,6 +104,11 @@ typedef struct {
 } vslot;
 
 static vslot S[NSLOT];
+#include "vf_fir.h"
+/* hi-res input window for one cache fill: CACHE_FRAMES/dec output frames
+ * need CACHE_FRAMES + taps input frames (stereo s32) */
+#define INBUF_FRAMES (CACHE_FRAMES + FIR4_N + 1)
+static int inbuf[INBUF_FRAMES * 2];
 static void *neg[NNEG];           /* recent handles known NOT to be FLAC */
 static u32 negi;
 
@@ -515,7 +524,7 @@ static vslot *probe(void *fp)
         ((fseek_t)o_seek)(fp, 0, 0);
         int got = ((fread_t)o_fread)(m, 1, 4, fp);
         ((fseek_t)o_seek)(fp, pos, 0);
-        if (got != 4 || memcmp(m, s->kind == 1 ? "fLaC" : "OggS", 4)) {
+        if (got != 4 || memcmp(m, s->kind == 2 ? "OggS" : "fLaC", 4)) {
             memset(s, 0, offsetof(vslot, cache));
             neg[negi++ % NNEG] = fp;
             vf_stats[5]++;            /* stale-slot recoveries */
@@ -561,27 +570,83 @@ static vslot *probe(void *fp)
     s->kind = 1;
     drflac_allocation_callbacks cb = { s, a_malloc, a_realloc, a_free };
     s->f = drflac_open_with_metadata(rd_cb, sk_cb, tl_cb, on_meta, s, &cb);
-    if (!s->f || !(s->f->sampleRate == 44100 || s->f->sampleRate == 48000) ||
-        s->f->channels < 1 || s->f->channels > 2) {
-        s->fp = 0;                               /* not playable: stock path */
-        neg[negi++ % NNEG] = fp;
-        return 0;
+    u32 sr = s->f ? s->f->sampleRate : 0, dec = 0;
+    if (sr == 44100 || sr == 48000) dec = 1;
+    else if (sr == 88200 || sr == 96000) dec = 2;        /* 2026-10-25 deck: a */
+    else if (sr == 176400 || sr == 192000) dec = 4;      /* 96k FLAC froze it */
+    if (!s->f || !dec || s->f->channels < 1 || s->f->channels > 2) {
+        /* a FLAC we can't play: the deck already lists .flac as WAV, so the
+         * stock path would feed raw FLAC to its WAV parser (deck freeze,
+         * 2026-10-25). Serve an EMPTY file instead: the deck reports it
+         * can't play it. */
+        s->kind = 3;
+        s->vsize = s->hdrlen = 0;
+        s->frames = 0;
+        vf_stats[7]++;
+        return s;
     }
     vf_stats[1]++;
-    s->rate = s->f->sampleRate;
+    s->dec = (u8)dec;
+    s->rate = sr / dec;
     s->ch = (u8)s->f->channels;
     s->bps = s->f->bitsPerSample > 16 ? 3 : 2;
     s->bpf = s->ch * s->bps;
-    s->frames = (u32)s->f->totalPCMFrameCount;
+    s->frames = (u32)(s->f->totalPCMFrameCount / dec);
     s->cache_n = 0;
     make_header(s);
     s->vsize = s->hdrlen + s->frames * s->bpf;
     return s;
 }
 
+/* hi-res: output frames k.. = low-passed input decimated by s->dec.
+ * y[i] = sum_j h[j] * x[i*dec + j - H], H = (taps-1)/2, x = 0 outside the
+ * track. Samples are s32 left-justified (24-bit audio << 8): filtered at
+ * 24 bits with a 64-bit accumulator, clamped, shifted back. */
+static int fill_dec(vslot *s, u32 k)
+{
+    u32 D = s->dec, T = D == 2 ? FIR2_N : FIR4_N, H = (T - 1) / 2, ch = s->ch;
+    const short *h = D == 2 ? fir2 : fir4;
+    u32 nout = CACHE_FRAMES / D;
+    if (k >= s->frames) return 0;
+    if (nout > s->frames - k) nout = s->frames - k;
+    long long in0 = (long long)k * D - H;
+    u32 need = nout * D + T - 1;                 /* input frames in the window */
+    u32 total = (u32)s->f->totalPCMFrameCount;
+    long long a = in0 < 0 ? 0 : in0, b = in0 + need;
+    if (b > total) b = total;
+    for (u32 i = 0; i < need * ch; i++) inbuf[i] = 0;
+    if (b > a) {
+        if ((u32)a != s->next_frame) {
+            if (!drflac_seek_to_pcm_frame(s->f, (u32)a)) return 0;
+        }
+        u32 got = (u32)drflac_read_pcm_frames_s32(s->f, (u32)(b - a),
+                                                   inbuf + (u32)(a - in0) * ch);
+        s->next_frame = (u32)a + got;
+    }
+    for (u32 i = 0; i < nout; i++)
+        for (u32 c = 0; c < ch; c++) {
+            long long acc = 0;
+            const int *x = inbuf + (i * D) * ch + c;
+            /* symmetric taps (h[j] == h[T-1-j]): pair them -> half the
+             * multiplies; the centre tap alone */
+            for (u32 j = 0; j < H; j++)
+                acc += (long long)((x[j * ch] >> 8) + (x[(T - 1 - j) * ch] >> 8)) * h[j];
+            acc += (long long)(x[H * ch] >> 8) * h[H];
+            acc >>= 15;
+            if (acc > 0x7FFFFF) acc = 0x7FFFFF;
+            if (acc < -0x800000) acc = -0x800000;
+            s->cache[i * ch + c] = (int)acc << 8;
+        }
+    vf_stats[3]++;
+    s->cache_frame = k;
+    s->cache_n = nout;
+    return 1;
+}
+
 /* decoded frame k (s32, left-justified by dr_flac) -> cache */
 static int fill(vslot *s, u32 k)
 {
+    if (s->dec > 1) return fill_dec(s, k);
     if (k >= s->frames) return 0;
     if (k != s->next_frame) {
         if (!drflac_seek_to_pcm_frame(s->f, k)) return 0;
@@ -599,6 +664,7 @@ static int vread(vslot *s, u8 *out, u32 n)
 {
     u32 done = 0;
     vf_stats[2]++;
+    if (s->kind == 3) return 0;                  /* unplayable FLAC: empty */
     while (done < n && s->vpos < s->vsize) {
         if (s->vpos < s->hdrlen) {
             out[done++] = s->hdr[s->vpos++];
@@ -625,11 +691,19 @@ static int vread(vslot *s, u8 *out, u32 n)
         u32 avail = (s->cache_frame + s->cache_n - fr) * s->bpf - b;
         if (avail > n - done) avail = n - done;
         if (avail > s->vsize - s->vpos) avail = s->vsize - s->vpos;
-        for (u32 i = 0; i < avail; i++) {
-            u32 p = b + i, c = (p / s->bps) % s->ch, byte = p % s->bps;
-            int v = smp[(p / s->bpf) * s->ch + c];
-            /* s32 left-justified: 16-bit -> bytes 2,3 ; 24-bit -> 1,2,3 */
-            out[done + i] = (u8)(v >> (8 * (4 - s->bps + byte)));
+        /* samples are interleaved (frame*ch + c), so one running sample
+         * index + byte counter covers it -- no division per byte (it was 3
+         * per byte, library calls for 24-bit: 2026-10-25 hi-res FLAC used
+         * ~1/3 of the deck's CPU) */
+        {
+            u32 bps = s->bps, si = b / bps, bi = b - si * bps;
+            u32 sh = 8 * (4 - bps + bi);        /* s32 left-justified */
+            u8 *o = out + done;
+            for (u32 i = 0; i < avail; i++) {
+                o[i] = (u8)(smp[si] >> sh);
+                sh += 8;
+                if (++bi == bps) { bi = 0; si++; sh = 8 * (4 - bps); }
+            }
         }
         done += avail;
         s->vpos += avail;
@@ -638,7 +712,7 @@ static int vread(vslot *s, u8 *out, u32 n)
 }
 
 /* ================= hooks (same signatures as the stock slots) ========== */
-int vf_fread(void *buf, int size, int count, void *fp)
+int vfc_fread(void *buf, int size, int count, void *fp)
 {
     vslot *s = probe(fp);
     if (!s) return ((fread_t)vf_read_prev)(buf, size, count, fp);
@@ -649,7 +723,7 @@ int vf_fread(void *buf, int size, int count, void *fp)
     return r;
 }
 
-int vf_fread_direct(void *buf, int size, int count, void *fp)
+int vfc_fread_direct(void *buf, int size, int count, void *fp)
 {
     vslot *s = probe(fp);
     if (!s) return ((fread_t)vf_direct_prev)(buf, size, count, fp);
@@ -660,7 +734,7 @@ int vf_fread_direct(void *buf, int size, int count, void *fp)
     return r;
 }
 
-int vf_seek(void *fp, int off, int whence)
+int vfc_seek(void *fp, int off, int whence)
 {
     vslot *s = probe(fp);
     if (!s) return ((fseek_t)o_seek)(fp, off, whence);
@@ -673,21 +747,21 @@ int vf_seek(void *fp, int off, int whence)
     return 0;
 }
 
-int vf_tell(void *fp)
+int vfc_tell(void *fp)
 {
     vslot *s = probe(fp);
     if (s) L(3, fp, 0, 0, s->vpos);
     return s ? (int)s->vpos : ((ftell_t)o_tell)(fp);
 }
 
-int vf_eof(void *fp)
+int vfc_eof(void *fp)
 {
     vslot *s = probe(fp);
     if (s) L(4, fp, s->vpos, s->vsize, s->vpos >= s->vsize);
     return s ? s->vpos >= s->vsize : ((ftell_t)o_eof)(fp);
 }
 
-int vf_size(void *fp, u32 *out)
+int vfc_size(void *fp, u32 *out)
 {
     vslot *s = probe(fp);
     if (!s) return ((fsize_t)o_size)(fp, out);
@@ -696,7 +770,7 @@ int vf_size(void *fp, u32 *out)
     return 0;
 }
 
-int vf_close(void *fp)
+int vfc_close(void *fp)
 {
     vslot *s = find(fp);
     if (s) { s->fp = 0; L(6, fp, 0, 0, 0); }
@@ -704,7 +778,30 @@ int vf_close(void *fp)
     return ((fclose_t)o_close)(fp);
 }
 
-#ifndef VF_NATIVE
+#ifdef VF_NATIVE
+/* Mac test build: no stack switch */
+int vf_fread(void *b, int sz, int c, void *fp) { return vfc_fread(b, sz, c, fp); }
+int vf_fread_direct(void *b, int sz, int c, void *fp) { return vfc_fread_direct(b, sz, c, fp); }
+int vf_seek(void *fp, int off, int wh) { return vfc_seek(fp, off, wh); }
+int vf_tell(void *fp) { return vfc_tell(fp); }
+int vf_eof(void *fp) { return vfc_eof(fp); }
+int vf_size(void *fp, u32 *out) { return vfc_size(fp, out); }
+int vf_close(void *fp) { return vfc_close(fp); }
+#else
+/* 2026-10-25: the deck froze loading a FLAC -- drflac_open alone needs
+ * 4.5 KB of stack and the deck's track-loading task has less; the decoder
+ * overwrote that task's saved registers ("returned" to address 0, the
+ * emulator reproduced it). The exported entries vf_* are now tiny assembly
+ * wrappers (vfstack.S) that run the C code on this private stack. */
+u32 vf_stack[4096] __attribute__((aligned(8)));     /* 16 KB */
+u32 vf_stack_busy, vf_stack_peak_lo = 0xFFFFFFFFu;
+int vf_fread(void *, int, int, void *);
+int vf_fread_direct(void *, int, int, void *);
+int vf_seek(void *, int, int);
+int vf_tell(void *);
+int vf_eof(void *);
+int vf_size(void *, u32 *);
+int vf_close(void *);
 __attribute__((section(".entry"), used))
 const void *const vf_entry[8] = {
     (const void *)vf_fread, (const void *)vf_fread_direct, (const void *)vf_seek,

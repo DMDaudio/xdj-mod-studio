@@ -21,6 +21,7 @@ Two ways to run it:
 """
 import math
 import os
+import sys
 import threading
 import time
 
@@ -221,6 +222,10 @@ class EmuApp:
         # audio driver above does not matter: decksound goes through
         # AudioToolbox directly.
         os.environ.setdefault("XDJ_HLE_DSP", "1")
+        # the app's emulator runs in play mode: the audio chip on its own
+        # thread, devices ticked in larger slices -- much faster, not
+        # cycle-exact. Test / mod-validation tools never set it (exact).
+        os.environ.setdefault("XDJ_PLAY", "1")
         pygame.init()
         self.view = "deck"
         self.paused = False
@@ -623,17 +628,15 @@ class EmuApp:
         if m.mem.r32(RD.POOL) in (RD.PALETTE, RD.DCAVE) and \
                 m.mem.r16(RD.INSN) in (RD.INSN_OLD, RD.INSN_NEW):
             RD.install(m.mem)            # C colour module + shim + row patch
-        # the rest of the deck set: version switching + the MY SETTINGS
-        # rows (same bytes as tools/deck_session.py installs)
+        # the rest of the deck set: version switching + the mod settings in
+        # UTILITY (same bytes as tools/deck_session.py installs; 1.0: no
+        # MY SETTINGS rows any more)
         import vredirect as VR
-        import mysettings as MSET
         if m.mem.r32(VR.HOOK) == VR.FREAD:
             for a, b in VR.plan():
                 m.mem.w8(a, b)
-        if all(m.mem.r32(p) == old for p, old, new in MSET.hooks()):
-            MSET.install(m.mem)
-        try:                          # the same rows in UTILITY (hold MENU)
-            import utility as UT      # (tools/utility_apply.py, step 5c2)
+        try:                          # mod settings in UTILITY (hold MENU)
+            import utility as UT      # (tools/utility_apply.py, step 5u)
             if m.mem.r32(UT.POOLS[0]) == UT.STOCK_TAB:
                 UT.install(m.mem)
         except Exception:
@@ -643,17 +646,93 @@ class EmuApp:
         import perform_pads as PP
         if all(m.mem.r32(p) == old for p, old, new in PP.hooks()):
             PP.install(m.mem)
-        self._install_phasemeter(m)
+        self._install_light(m)         # UNDER pm/hc: lt_fill rewrites their
+        self._install_phasemeter(m)   # fill colours too
         self._install_hotcue8(m)
         self._install_themesw(m)
         self._install_stems(m)        # deck order: 5g stems, 5h FLAC, 5k key
         self._install_flac(m)
         self._install_keyshift(m)
+        self._arm_light(m)            # pads' PDKW + pm_light need their caves
         self.wave_mode = name
         self.status = (f"waveform: {name} - load a track to see it; "
-                       f"BROWSE > MENU > MY SETTINGS = mod rows"
+                       f"hold MENU > UTILITY = mod settings"
                        + (" (3-band needs PWV6: run tools/stick_add_3band.py)"
                           if name == "3band" else ""))
+
+    def _install_light(self, m):
+        """Light-mode add-on (tools/lighttext, 2026-10-26): lt.c/ltentry.S
+        wrappers for the title blender, waveform windows + colours, and the
+        flush-chain fill rewrite -- chained FIRST (under the phase meter /
+        hot cues) so lt_fill also rewrites their list units. Arms the pads'
+        ink-flip word (PDKW) and the phase meter's pm_light with LIGHT's
+        number in the theme switcher; both follow the switcher's current
+        theme byte on their own. Skipped quietly when not built."""
+        d = os.path.join(ROOT, "build", "lighttext")
+        try:
+            syms = {}
+            for line in open(os.path.join(d, "lt.syms")):
+                a, _, n = line.split()
+                syms[n.lstrip("_")] = int(a, 16)
+            img = open(os.path.join(d, "lt.bin"), "rb").read()
+        except OSError:
+            return
+        import theme_switch as TS
+        try:
+            idx = TS.default_names().index("light") + 1
+        except ValueError:
+            return
+        TEXT_POOLS = (0x08C2F8FC, 0x08C31FC4)
+        MSET_POOLS = (0x08DC3B44, 0x08DC2808, 0x08DBC3FC)   # +overview strip
+        RGB_POOLS = (0x08DC2A24, 0x08DC2C74, 0x08DC2EA4, 0x08DC31A0, 0x08DC32B0,
+                     0x08DC3DA8, 0x08DC3FF4, 0x08DC417C, 0x08DC4470, 0x08DC4758,
+                     0x08DC4A24)
+        live = m.mem.r32(syms["lt_head"])
+        if live != 0x5448474C:                     # not ours yet
+            if any(m.mem.r8(a) for a in range(syms["lt_head"],
+                                              syms["lt_head"] + len(img), 64)):
+                return                             # cave in use
+            for i, b in enumerate(img):
+                m.mem.w8(syms["lt_head"] + i, b)
+            for p in TEXT_POOLS:
+                if m.mem.r32(p) == 0x08C2F5C2:
+                    m.mem.w32(p, syms["lt_entry"])
+            for p in MSET_POOLS:
+                if m.mem.r32(p) == 0x08E1D954:
+                    m.mem.w32(p, syms["lt_mset"])
+            for p in RGB_POOLS:
+                if m.mem.r32(p) == 0x08DB6CD4:
+                    m.mem.w32(p, syms["lt_rgb"])
+            m.mem.w32(syms["lt_prev"], m.mem.r32(0x08C92E20))
+            m.mem.w32(0x08C92E20, syms["lt_flush"])
+        m.mem.w32(syms["lt_idx"], idx)
+        self._lt_syms = syms
+
+    def _arm_light(self, m):
+        """Light add-on's second half: arm the pads' ink-flip word (PDKW)
+        and the phase meter's pm_light with LIGHT's number -- AFTER their
+        modules are installed (their installers reset those words)."""
+        syms = getattr(self, "_lt_syms", None)
+        if syms is None:
+            return
+        try:
+            import theme_switch as TS
+            idx = TS.default_names().index("light") + 1
+        except ValueError:
+            return
+        import perform_pads as PP
+        if m.mem.r32(PP.PDKW) in (0, PP.PDKSTUB, syms["lt_pdk"]):
+            m.mem.w32(PP.PDKW, syms["lt_pdk"])
+        pd = os.path.join(ROOT, "build", "phasemeter")
+        try:
+            for line in open(os.path.join(pd, "pm.syms")):
+                a, _, n = line.split()
+                if n.lstrip("_") == "pm_light":
+                    if m.mem.r32(int(a, 16)) in (0, idx):
+                        m.mem.w32(int(a, 16), idx)
+                    break
+        except OSError:
+            pass
 
     def _install_phasemeter(self, m):
         """Type 1 phase meter (tools/phasemeter, C): same bytes as the deck
@@ -710,13 +789,21 @@ class EmuApp:
     def _install_themesw(self, m):
         """On-deck theme switching (tools/theme_switch.py, deck C): the
         prebuilt build/themesw files, same bytes as theme_switch_apply.py.
-        MY SETTINGS > [THEME] then steps through the themes live."""
+        UTILITY > THEME then picks the themes live."""
         d = os.path.join(ROOT, "build", "themesw")
         try:
             code = open(os.path.join(d, "ts.bin"), "rb").read()
-            from . import fwhome
-            tp = os.path.join(fwhome.home(), "themesw_tables.bin")
-            data = open(tp if os.path.exists(tp) else os.path.join(d, "tables.bin"), "rb").read()
+            # 2026-10-25: build the tables fresh (<1 s) -- the copy fwhome
+            # made at setup goes stale whenever ts.c / the maths change
+            try:
+                sys.path.insert(0, os.path.join(ROOT, "tools"))
+                sys.path.insert(0, os.path.join(ROOT, "mods"))
+                import theme_switch as TS
+                data = TS.blob(TS.default_names())
+            except Exception:
+                from . import fwhome
+                tp = os.path.join(fwhome.home(), "themesw_tables.bin")
+                data = open(tp if os.path.exists(tp) else os.path.join(d, "tables.bin"), "rb").read()
             cb, db = (int(x, 16) for x in
                       open(os.path.join(d, "layout.txt")).read().split()[:2])
         except (OSError, ValueError):

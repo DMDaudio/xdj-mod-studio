@@ -72,6 +72,10 @@ if [ -f build/phasemeter/pm.bin ]; then
   mkdir -p "$REPO/build/phasemeter"
   cp build/phasemeter/pm.bin build/phasemeter/pm.syms "$REPO/build/phasemeter/"
 fi
+# FLAC-only decoder build (Studio installs it unless the stick has .opus)
+VF_OPUS=0 VF_OUT="$PWD/build/xflac_flac" sh tools/xflac/build_vfile.sh >/dev/null
+mkdir -p "$REPO/build/xflac_flac"
+cp build/xflac_flac/vfile.bin build/xflac_flac/vfile.syms "$REPO/build/xflac_flac/"
 # UTILITY mod rows (our C)
 sh tools/utility/build.sh >/dev/null
 mkdir -p "$REPO/build/utility"
@@ -92,7 +96,7 @@ if [ "$PUBLIC" = 1 ]; then
   MSTAPP=$(.venv/bin/python -c "import sys;sys.path[:0]=['tools'];import mysettings as M;print(hex(M.MSTAPP))") \
     sh tools/themesw/build.sh >/dev/null
   cp build/themesw/ts.bin build/themesw/ts.syms "$REPO/build/themesw/"
-  printf '0x9770000 0x9776000\n' > "$REPO/build/themesw/layout.txt"
+  printf '0x9770000 0x9779000\n' > "$REPO/build/themesw/layout.txt"
 else
   .venv/bin/python tools/theme_switch.py export >/dev/null
   cp build/themesw/ts.bin build/themesw/ts.syms build/themesw/tables.bin build/themesw/layout.txt "$REPO/build/themesw/"
@@ -137,6 +141,9 @@ if [ -f work/tic6x/objdump ]; then mkdir -p "$REPO/work/tic6x"; cp work/tic6x/ob
 find "$REPO" -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 find "$REPO" -name "*.pyc" -delete 2>/dev/null || true
 find "$REPO" -name ".DS_Store" -delete 2>/dev/null || true
+find "$REPO" \( -name "*.pre-*" -o -name "*.bak" -o -name "*.orig" \) -delete 2>/dev/null || true
+# debug-symbol bundles (cc -g leftovers) carry the builder's paths
+find "$REPO" -name "*.dSYM" -type d -prune -exec rm -rf {} + 2>/dev/null || true
 rm -f "$REPO"/studio/*.BACKUP "$REPO"/tools/*.bak
 # No source in the shipped app: compile every module to a sourceless .pyc
 # beside it (same Python as the frozen server, so imports + --run-tool

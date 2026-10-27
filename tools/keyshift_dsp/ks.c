@@ -28,7 +28,15 @@ typedef unsigned int u32;
 #define SPEED        (*(volatile u32 *)(B14 + 316))          /* Q20 tempo   */
 #define BLOCKNO      (*(volatile unsigned short *)(B14 + 510))  /* 0..31    */
 #define MAILBOX_BD8  (*(volatile u32 *)0x11837BD8u)
-#define STAGE        ((float *)0x1182AD70u)   /* 32 frames L,R; 3 history before */
+#define STAGE        ((float *)0x1182AD70u)   /* 32 frame slots L,R */
+/* 2026-10-25: the 24 bytes before STAGE are NOT history samples but the
+ * buffer's bookkeeping record (blk1 0x17414: a11 = 0x1182AD58, passed to the
+ * advance routine 0xC00056D0): +0 capacity (32), +4 VALID frames (16 in
+ * play), +8 read pos ... The old code read +16/+20 as the "previous" L/R
+ * sample and peeked/consumed past the valid frames (the advance routine
+ * then refuses to move at all) -- per-block clicks, a buzz on the deck
+ * (right channel on AIFF). Now: own history, never past VALID. */
+#define STAGE_VALID  (*(volatile u32 *)0x1182AD5Cu)
 #define PULLER       ((int (*)(void))0xC001CBF4u)
 
 #define NFR 32
@@ -58,6 +66,8 @@ struct ks {
     u32 w_latched;
     float k, phi;
     u32 last_nx, last_ny;
+    float hl, hr;          /* the original frame just before STAGE[0] */
+    u32 clamps;            /* blocks where VALID limited the take */
 };
 extern struct ks KS;    /* placed by the linker script */
 
@@ -86,12 +96,15 @@ int ks_pull(void)
     struct ks *s = &KS;
     const float *x = STAGE;
     float *y = s->pbuf;
-    if (s->magic != 0x4B534832u) {
-        s->magic = 0x4B534832u; s->w_latched = 0; s->phi = 0.0f;
-        s->calls = s->shifted = 0;
+    if (s->magic != 0x4B534833u) {           /* v3 layout */
+        s->magic = 0x4B534833u; s->w_latched = 0; s->phi = 0.0f;
+        s->calls = s->shifted = s->clamps = 0;
+        s->hl = s->hr = 0.0f;
     }
     s->calls++;
     stage_inv();
+    u32 valid = STAGE_VALID;
+    if (valid > NFR) valid = NFR;
 
     if (BLOCKNO == 0) {                      /* chunk start: (re)latch k */
         u32 w = MAILBOX_BD8;
@@ -111,20 +124,30 @@ int ks_pull(void)
     if (s->w_latched == 0) {                 /* stock: the stretcher sees */
         for (int i = 0; i < NFR * 2; i++)    /* exactly what staging holds */
             y[i] = x[i];
+        int used = PULLER();
+        if (used > 0 && used <= (int)NFR) {  /* history for a later shift */
+            s->hl = x[2 * used - 2]; s->hr = x[2 * used - 1];
+        }
+        return used;
+    }
+    if (valid < 4) {                         /* nothing sensible to shift */
+        for (int i = 0; i < NFR * 2; i++) y[i] = x[i];
         return PULLER();
     }
 
     /* 1. resampled frames -> pbuf (staging untouched) */
     float k = s->k, phi = s->phi;
     int last = 0;
+    int vl = (int)valid - 1;                 /* last valid frame index */
     for (int j = 0; j < NFR; j++) {
         float pos = phi + (float)j * k;
         int i = (int)pos;                    /* pos >= 0 */
         float t = pos - (float)i;
-        if (i + 2 > NFR - 1) break;
-        float lm1 = x[2 * i - 2], rm1 = x[2 * i - 1];   /* i = 0: history */
-        y[2 * j]     = cubic(lm1, x[2 * i], x[2 * i + 2], x[2 * i + 4], t);
-        y[2 * j + 1] = cubic(rm1, x[2 * i + 1], x[2 * i + 3], x[2 * i + 5], t);
+        if (i > vl) break;                   /* past the valid frames */
+        int i1 = i + 1 > vl ? vl : i + 1, i2 = i + 2 > vl ? vl : i + 2;
+        float lm1 = i ? x[2 * i - 2] : s->hl, rm1 = i ? x[2 * i - 1] : s->hr;
+        y[2 * j]     = cubic(lm1, x[2 * i], x[2 * i1], x[2 * i2], t);
+        y[2 * j + 1] = cubic(rm1, x[2 * i + 1], x[2 * i1 + 1], x[2 * i2 + 1], t);
         last = j;
     }
     for (int j = last + 1; j < NFR; j++) {   /* never consumed; keep sane */
@@ -137,11 +160,15 @@ int ks_pull(void)
     int ny = PULLER();
     if (SPEED == sp1) SPEED = sp0;           /* host may have updated it */
 
-    /* 3. report original frames used */
+    /* 3. report original frames used -- never more than are VALID (the
+     * advance routine ignores a block that over-consumes); the rest of the
+     * position carries in phi to the next block */
     float end = phi + (float)ny * k;
     int nx = (int)end;
-    if (nx > NFR) nx = NFR;
+    if (nx > (int)valid) { nx = (int)valid; s->clamps++; }
     s->phi = end - (float)nx;
+    if (s->phi > 8.0f) s->phi = 8.0f;        /* never run away */
+    if (nx > 0) { s->hl = x[2 * nx - 2]; s->hr = x[2 * nx - 1]; }
     s->shifted++;
     s->last_nx = nx; s->last_ny = ny;
     return nx;

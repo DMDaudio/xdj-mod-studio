@@ -96,6 +96,10 @@ def load_lib():
         "c6x_splx_pending": ([P], ctypes.c_int),
         "c6x_set_idle_loop": ([P, u32, u32, u32], None),
         "c6x_skip": ([P, u64], None),
+        "c6x_set_dff": ([P, ctypes.c_int], None),
+        "c6x_dff_stat": ([P, ctypes.c_int], u64),
+        "c6x_settle": ([P], None), "c6x_dff_frozen": ([P], ctypes.c_int),
+        "c6x_ifr_or": ([P, u32], None), "c6x_ifr_and": ([P, u32], None),
     }
     for name, (args, res) in sig.items():
         f = getattr(lib, name)
@@ -473,6 +477,8 @@ class CCpu:
         self.lib = lib = load_lib()
         self.mem = mem
         self.h = lib.c6x_new(21)
+        # delay-loop fast-forward (c6xcore.c dff_*); XDJ_DSP_DFF=0 = off
+        lib.c6x_set_dff(self.h, 0 if os.environ.get("XDJ_DSP_DFF") == "0" else 1)
         self.r = (u32 * 64).from_address(ctypes.addressof(lib.c6x_regs(self.h).contents))
         self.c = CtrlMap((u32 * 30).from_address(ctypes.addressof(lib.c6x_ctrl(self.h).contents)))
         self.prog = {}
@@ -599,18 +605,37 @@ class CCpu:
         self.pyfn.clear()
         self.lib.c6x_clear_code(self.h)
 
+    def ifr_or(self, m):
+        self.lib.c6x_ifr_or(self.h, m & MASK)
+
+    def ifr_and(self, m):
+        self.lib.c6x_ifr_and(self.h, m & MASK)
+
     # ---- state
-    pc = property(lambda s: s.lib.c6x_pc(s.h), lambda s, v: s.lib.c6x_set_pc(s.h, v & MASK))
+    def settle(self):
+        """make r/c/memory exactly what plain execution would show now (a
+        delay call fast-forwarded with interrupts off is re-run up to the
+        current cycle; no-op otherwise). The status getters below call it;
+        code that reads the raw `r`/`c` views mid-run must call it first."""
+        self.lib.c6x_settle(self.h)
+
+    def _g(f):
+        def get(s):
+            s.lib.c6x_settle(s.h)
+            return f(s)
+        return get
+
+    pc = property(_g(lambda s: s.lib.c6x_pc(s.h)), lambda s, v: s.lib.c6x_set_pc(s.h, v & MASK))
     cycle = property(lambda s: s.lib.c6x_cycle(s.h), lambda s, v: s.lib.c6x_set_cycle(s.h, v))
     idle = property(lambda s: bool(s.lib.c6x_idle(s.h)), lambda s, v: s.lib.c6x_set_idle(s.h, int(bool(v))))
-    stall = property(lambda s: s.lib.c6x_stall(s.h))
-    ev = property(lambda s: s.lib.c6x_evcount(s.h))
-    pend = property(lambda s: s.lib.c6x_npend(s.h))
-    sp = property(lambda s: True if s.lib.c6x_sp_on(s.h) else None)
-    splx_irq = property(lambda s: s.lib.c6x_splx_pending(s.h) or None)
-    branch_at = property(lambda s: s.lib.c6x_npend(s.h) or None)
-    ep_count = property(lambda s: s.lib.c6x_counts(s.h, 0))
-    insn_count = property(lambda s: s.lib.c6x_counts(s.h, 1))
+    stall = property(_g(lambda s: s.lib.c6x_stall(s.h)))
+    ev = property(_g(lambda s: s.lib.c6x_evcount(s.h)))
+    pend = property(_g(lambda s: s.lib.c6x_npend(s.h)))
+    sp = property(_g(lambda s: True if s.lib.c6x_sp_on(s.h) else None))
+    splx_irq = property(_g(lambda s: s.lib.c6x_splx_pending(s.h) or None))
+    branch_at = property(_g(lambda s: s.lib.c6x_npend(s.h) or None))
+    ep_count = property(_g(lambda s: s.lib.c6x_counts(s.h, 0)))
+    insn_count = property(_g(lambda s: s.lib.c6x_counts(s.h, 1)))
     interrupts = property(lambda s: s.lib.c6x_counts(s.h, 2))
     py_calls = property(lambda s: s.lib.c6x_counts(s.h, 3))
 

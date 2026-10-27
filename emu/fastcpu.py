@@ -15,6 +15,7 @@ Falls back to the Python core (same state, converted both ways):
 Checkpoints are interchangeable with the Python core (same __getstate__).
 Select with XDJ_CORE=py to force the Python core everywhere.
 """
+import collections.abc
 import ctypes
 import os
 import struct
@@ -28,17 +29,36 @@ LIB = os.path.join(HERE, "_fastcore.dll" if sys.platform == "win32"
 
 R_LIMIT, R_IDLE, R_SLEEP, R_IO, R_FALLBACK = range(5)
 MD, RB, BL = 1 << 30, 1 << 29, 1 << 28
-SLICE = 8192
+SLICE = 8192           # max SH steps per core_run (device tick granularity)
+
+
+def _slice():
+    """XDJ_SLICE overrides; play mode (XDJ_PLAY=1) ticks devices 16x less
+    often (not cycle-exact vs the default)."""
+    v = os.environ.get("XDJ_SLICE")
+    if v:
+        return int(v)
+    return 131072 if os.environ.get("XDJ_PLAY") == "1" else SLICE
 
 u32, u64, vp = ctypes.c_uint32, ctypes.c_uint64, ctypes.c_void_p
 IO_RD = ctypes.CFUNCTYPE(u32, u32)
 IO_WR = ctypes.CFUNCTYPE(None, u32, u32)
 IO_RDS = ctypes.CFUNCTYPE(u32, u32, u32)
+IRQ_CB = ctypes.CFUNCTYPE(None, u32)
+TDG_CONT = ctypes.CFUNCTYPE(None, u32, u32)
 IO_WRS = ctypes.CFUNCTYPE(None, u32, u32, u32)
 
 _REGS = ("pc", "pr", "gbr", "vbr", "mach", "macl", "sr", "ssr", "spc", "sgr",
          "dbr", "tra", "expevt", "intevt", "tea", "pteh", "ptel", "ptea",
          "ttb", "mmucr", "ccr", "fpscr", "fpul")
+
+
+class TdgIO(ctypes.Structure):
+    """emu/fastcore.c TdgIO: one 2DG display-list run in C"""
+    _fields_ = [("reg", u32 * 64), ("dirty", u64),
+                ("lcx", ctypes.c_int32), ("lcy", ctypes.c_int32),
+                ("ssr_or", u32), ("irq_ini", u32), ("irq_tri", u32),
+                ("stop_pc", u32), ("ops", u32), ("fb_bytes", u64)]
 
 
 class _DspRegion(ctypes.Structure):
@@ -66,10 +86,82 @@ class Core(ctypes.Structure):
                  ("cs6_py", u32), ("cs6_pad", u32),
                  ("tdg_reg", u32 * 64), ("tdg_ssr", u32),
                  ("tdg_dirty", u64), ("tdg_dirty_ssr", u64),
-                 ("tdg_py", u32), ("tdg_pad", u32),
+                 ("tdg_py", u32), ("tdg_on", u32),
                  ("cs6_fast", u32), ("dsp_region_n", u32),
                  ("dsp_region", _DspRegion * 8),
-                 ("cur_pc", u32), ("cur_pad", u32), ("run_commit", u64)])
+                 ("cur_pc", u32), ("cur_pad", u32), ("run_commit", u64),
+                 ("dmac_on", u32), ("dmac_pad", u32), ("dmac", u32 * 144),
+                 ("dmaor", u32 * 3), ("dmaor_pad", u32),
+                 ("tdg_cfast", u32), ("tdg_runs_c", u32),
+                 ("tdg_lcx", ctypes.c_int32), ("tdg_lcy", ctypes.c_int32),
+                 ("tdg_lc_dirty", u32), ("tdg_pad3", u32),
+                 ("irq_cb", IRQ_CB), ("tdg_cont", TDG_CONT)])
+
+_DMAC_BASES = (0xFE008000, 0xFDC08000, 0xFE009000)
+_DMA_KEYS = ("sar", "dar", "tcr", "chcr")
+_DMA_IDX = {k: i for i, k in enumerate(_DMA_KEYS)}
+
+
+class _DmaCh(collections.abc.MutableMapping):
+    """sh7724 DMAC channel dict backed by the C core's shared register
+    words (Core.dmac): Python and C see one copy, no syncing."""
+    __slots__ = ("_a", "_i")
+
+    def __init__(self, arr, i):
+        self._a, self._i = arr, i
+
+    def __getitem__(self, k):
+        return self._a[self._i + _DMA_IDX[k]]
+
+    def __setitem__(self, k, v):
+        self._a[self._i + _DMA_IDX[k]] = v & 0xFFFFFFFF
+
+    def __delitem__(self, k):
+        raise TypeError("DMAC channel registers cannot be deleted")
+
+    def __iter__(self):
+        return iter(_DMA_KEYS)
+
+    def __len__(self):
+        return 4
+
+    def __reduce__(self):                 # pickles / copies as a plain dict
+        return (dict, (dict(self),))
+
+
+class _DmaBase(collections.abc.MutableMapping):
+    """dev.dma[base]: {"dmaor": <shared word>, "ch": {n: _DmaCh}}"""
+    __slots__ = ("_or", "_b", "_ch")
+
+    def __init__(self, dmaor, b, ch):
+        self._or, self._b, self._ch = dmaor, b, ch
+
+    def __getitem__(self, k):
+        if k == "dmaor":
+            return self._or[self._b]
+        if k == "ch":
+            return self._ch
+        raise KeyError(k)
+
+    def __setitem__(self, k, v):
+        if k == "dmaor":
+            self._or[self._b] = v & 0xFFFFFFFF
+        else:
+            raise KeyError(k)
+
+    def __delitem__(self, k):
+        raise TypeError("cannot delete")
+
+    def __iter__(self):
+        return iter(("dmaor", "ch"))
+
+    def __len__(self):
+        return 2
+
+    def __reduce__(self):
+        return (dict, ({"dmaor": self["dmaor"],
+                        "ch": {n: dict(v) for n, v in self._ch.items()}},))
+
 
 
 _lib = None
@@ -99,6 +191,12 @@ def load_lib():
             lib = ctypes.CDLL(LIB)
     except (OSError, subprocess.CalledProcessError):
         return None
+    try:                              # 2DG display lists in C (2026-10-26)
+        lib.core_tdg_run.argtypes = [ctypes.POINTER(Core), u32,
+                                     ctypes.POINTER(TdgIO), u32]
+        lib.core_tdg_run.restype = ctypes.c_int
+    except AttributeError:
+        pass                          # reference build without it
     lib.core_run.argtypes = [ctypes.POINTER(Core), u64, ctypes.POINTER(u64)]
     lib.core_run.restype = ctypes.c_int
     lib.core_enter_interrupt.argtypes = [ctypes.POINTER(Core), u32, u32]
@@ -126,6 +224,41 @@ def load_lib():
         object.__setattr__(lib, "core_hpid", _fn)
         _fn.argtypes = [ctypes.POINTER(Core), ctypes.POINTER(u64)]
         _fn.restype = ctypes.c_void_p
+    # native loop fast paths (2026-10-25); absent in older reference builds
+    try:
+        lib.core_set_fastpath.argtypes = [ctypes.c_int]
+        lib.core_set_fastpath(0 if os.environ.get("XDJ_FASTPATH") == "0" else 1)
+    except AttributeError:
+        pass
+    try:                          # data-page cache (2026-10-26)
+        lib.core_set_dtlb.argtypes = [ctypes.c_int]
+        lib.core_set_dtlb(0 if os.environ.get("XDJ_DTLB") == "0" else 1)
+    except AttributeError:
+        pass
+    try:                          # decode-once table (2026-10-26)
+        lib.core_set_dtab.argtypes = [ctypes.c_int]
+        lib.core_set_dtab(0 if os.environ.get("XDJ_DTAB") == "0" else 1)
+    except AttributeError:
+        pass
+    try:                          # block engine (2026-10-26)
+        lib.core_set_blocks.argtypes = [ctypes.c_int]
+        lib.core_set_blocks(0 if os.environ.get("XDJ_BLOCKS") == "0" else 1)
+        lib.core_blk_stat.argtypes = [ctypes.c_int]
+        lib.core_blk_stat.restype = ctypes.c_uint64
+    except AttributeError:
+        pass
+    try:                          # native code for blocks (shjit.c, arm64 Mac)
+        lib.core_set_jit.argtypes = [ctypes.c_int]
+        lib.core_set_jit(0 if os.environ.get("XDJ_JIT") == "0" else 1)
+        lib.core_jit_stat.argtypes = [ctypes.c_int]
+        lib.core_jit_stat.restype = ctypes.c_uint64
+    except AttributeError:
+        pass
+    try:                          # debug: last bail reason (fastcore g_fp_bail)
+        lib.core_fp_bail.restype = ctypes.c_int
+        lib.core_fp_bails.argtypes = [ctypes.POINTER(u64)]
+    except AttributeError:
+        pass
     # cs6_fast region serving (2026-10-24): absent in pre-capture reference
     # builds -- stub to no-ops so cs6_fast simply never arms there.
     for _nm, _sig in (("core_clear_dsp_regions",
@@ -176,6 +309,8 @@ class FastSH4:
         self._pins = None
         self._pin_ids = None
         self._dsp_keep = []             # ctypes views of DSP RAM regions
+        self._tdg_obj = None            # 2DG device whose regs C mirrors
+        self._tdg_gen = -1
         self._py = None
         # cached word-read helper (emu.usb_fast), imported once, not per crossing
         try:
@@ -191,9 +326,47 @@ class FastSH4:
         self.core.io_rd = self._cb_rd
         self.core.io_wr = self._cb_wr
         self.core.io_rds = self._cb_rds
+        self._cb_irq = IRQ_CB(self._irq_from_c)
+        self._cb_cont = TDG_CONT(self._tdg_cont_from_c)
+        self.core.irq_cb = self._cb_irq
+        self.core.tdg_cont = self._cb_cont
         self.core.io_wrs = self._cb_wrs
         self.core.idle_pc = 0x08D6A7C0
         self.reset()
+        # 2DG display lists run in C (emu/tdg.py TDG.run asks mem for this;
+        # XDJ_TDG_C=0 keeps the pure-Python interpreter)
+        if (os.environ.get("XDJ_TDG_C", "1") != "0"
+                and hasattr(self.lib, "core_tdg_run")):
+            object.__setattr__(self, "_tdg_io", TdgIO())
+            mem.tdg_cexec = self._tdg_cexec
+
+    def _tdg_cexec(self, t, addr, limit):
+        """Run 2DG list at addr in C. Returns (finished, pc, ops_used):
+        finished -> TDG.run returns; else Python continues at pc (an op the
+        C side does not handle; nothing of it was done)."""
+        io = self._tdg_io
+        g = t.reg.get
+        io.reg[:] = [g(i * 4, 0) & 0xFFFFFFFF for i in range(64)]
+        io.lcx, io.lcy = t.lcofs
+        r = self.lib.core_tdg_run(ctypes.byref(self.core), addr & 0xFFFFFFFF,
+                                  ctypes.byref(io), limit)
+        d = io.dirty
+        if d:
+            reg = t.reg
+            for w in range(64):
+                if d >> w & 1:
+                    reg[w * 4] = io.reg[w]
+            if d >> (0x50 >> 2) & 1 and hasattr(t, "dsts"):
+                t.dsts.add(io.reg[0x50 >> 2])
+        t.lcofs = (io.lcx, io.lcy)
+        if io.fb_bytes:
+            self.mem.fb_writes += io.fb_bytes
+        t.ssr |= io.ssr_or
+        for _ in range(io.irq_ini):
+            t.raise_irq("TDG_INI")
+        if io.irq_tri:
+            t.raise_irq("TDG_TRI")
+        return (r == 0, io.stop_pc, io.ops)
 
     # -- register access (SH4-compatible) ----------------------------------
     def __getattr__(self, name):
@@ -322,34 +495,134 @@ class FastSH4:
 
     # -- 2DG register-file mirror (emu/tdg.py TDG) ---------------------------
     def _tdg_out(self):
-        """Flush the C 2DG register mirror into the Python device."""
+        """Flush the C 2DG register mirror into the Python device (C owns
+        the register file 0x00-0xFF while tdg_on)."""
         c = self.core
-        if not c.tdg_dirty and not c.tdg_dirty_ssr:
-            return                       # mirror not in use (2026-10-24)
-        t = getattr(self.mem.dev, "tdg", None)
+        if not c.tdg_on or not (c.tdg_dirty or c.tdg_dirty_ssr or
+                                c.tdg_lc_dirty or c.tdg_runs_c):
+            return
+        t = getattr(self, "_tdg_obj", None)
         if t is None:
             return
+        if c.tdg_lc_dirty:
+            t.lcofs = (c.tdg_lcx, c.tdg_lcy)
+            c.tdg_lc_dirty = 0
+        if c.tdg_runs_c:
+            t.runs = getattr(t, "runs", 0) + c.tdg_runs_c
+            c.tdg_runs_c = 0
+        reg = t.reg
+        d = c.tdg_dirty
         for w in range(64):
-            if c.tdg_dirty >> w & 1:
-                t.reg[w * 4] = c.tdg_reg[w] & 0xFFFFFFFF
+            if d >> w & 1:
+                reg[w * 4] = c.tdg_reg[w]
         c.tdg_dirty = 0
         if c.tdg_dirty_ssr:
-            t.ssr = c.tdg_ssr & 0xFFFFFFFF
+            t.ssr = c.tdg_ssr
             c.tdg_dirty_ssr = 0
 
     def _tdg_in(self):
-        """Adopt the Python device's 2DG registers into C."""
+        """Adopt the Python device's 2DG registers into the C mirror (after
+        Python touched them: a list ran, a restore, an off-mirror write)."""
         c = self.core
-        if not c.tdg_dirty and not c.tdg_dirty_ssr:
-            return                       # nothing to adopt (mirror unused)
-        t = getattr(self.mem.dev, "tdg", None)
+        if not c.tdg_on:
+            return
+        t = getattr(self, "_tdg_obj", None)
         if t is None:
             return
-        for i in range(64):
-            c.tdg_reg[i] = t.reg.get(i * 4, 0) & 0xFFFFFFFF
-        c.tdg_dirty = 0
+        g = t.reg.get
+        c.tdg_reg[:] = [g(i * 4, 0) & 0xFFFFFFFF for i in range(64)]
         c.tdg_ssr = t.ssr & 0xFFFFFFFF
+        c.tdg_lcx, c.tdg_lcy = t.lcofs
+        c.tdg_dirty = 0
         c.tdg_dirty_ssr = 0
+        c.tdg_lc_dirty = 0
+        object.__setattr__(self, "_tdg_gen", t.gen)
+
+    def _dmac_attach(self):
+        """Back dev.dma with the C core's register words (XDJ_DMAC_C=0
+        keeps the plain Python dicts and every access crossing)."""
+        c = self.core
+        dma = getattr(self.mem.dev, "dma", None)
+        if dma is None or os.environ.get("XDJ_DMAC_C", "1") == "0":
+            if c.dmac_on:
+                self._dmac_detach()
+            return
+        if isinstance(dma.get(_DMAC_BASES[0]), _DmaBase):
+            return                                  # already ours
+        arr, dor = c.dmac, c.dmaor
+        new = {}
+        for b, base in enumerate(_DMAC_BASES):
+            src = dma.get(base, {"dmaor": 0, "ch": {}})
+            dor[b] = src.get("dmaor", 0) & 0xFFFFFFFF
+            chs = {}
+            for ch in range(12):
+                i = (b * 12 + ch) * 4
+                st = src["ch"].get(ch, {})
+                for k, key in enumerate(_DMA_KEYS):
+                    arr[i + k] = st.get(key, 0) & 0xFFFFFFFF
+                chs[ch] = _DmaCh(arr, i)
+            new[base] = _DmaBase(dor, b, chs)
+        for base, v in dma.items():                 # anything unexpected
+            if base not in new:
+                new[base] = v
+        self.mem.dev.dma = new
+        c.dmac_on = 1
+
+    def _dmac_detach(self):
+        dev = self.mem.dev
+        dev.dma = {b: {"dmaor": v["dmaor"],
+                       "ch": {ch: dict(st) for ch, st in v["ch"].items()}}
+                   for b, v in dev.dma.items()}
+        self.core.dmac_on = 0
+
+    def _irq_from_c(self, which):
+        try:
+            self.mem.dev.tdg.raise_irq("TDG_TRI" if which else "TDG_INI")
+        except Exception as e:
+            self._io_err = repr(e)
+
+    def _tdg_cont_from_c(self, pc, ops):
+        """A list the C core stopped in (unknown op / non-RAM memory):
+        Python continues it, exactly like TDG.run after _tdg_cexec."""
+        dev = self.mem.dev
+        try:
+            before = len(dev.pending)
+            self._tdg_out()
+            dev.tdg.run_from(pc, ops)
+            self._tdg_in()
+            if len(dev.pending) != before:
+                self.core.io_break = 1
+        except Exception as e:
+            self._io_err = repr(e)
+            self.core.io_break = 1
+
+    def _tdg_attach(self):
+        """Hand the 2DG register file to C once the device exists
+        (XDJ_TDG_MIRROR=0 keeps every access in Python)."""
+        c = self.core
+        t = getattr(self.mem.dev, "tdg", None)
+        if t is None or os.environ.get("XDJ_TDG_MIRROR", "1") == "0":
+            if c.tdg_on:
+                self._tdg_out()
+                c.tdg_on = 0
+            return
+        if t is not getattr(self, "_tdg_obj", None):
+            if c.tdg_on:
+                self._tdg_out()
+            object.__setattr__(self, "_tdg_obj", t)
+            t.pull = self._tdg_out          # TDG.state() flushes first
+            c.tdg_on = 1
+            self._tdg_in()
+        elif t.gen != getattr(self, "_tdg_gen", -1):          # restored behind our back
+            self._tdg_in()
+        # SCLR runs the list straight from C (XDJ_TDG_CFAST=0: via Python)
+        mem = self.mem
+        c.tdg_cfast = 1 if (c.tdg_on and getattr(mem, "tdg_cexec", None)
+                            is not None
+                            and getattr(t, "draw_log", None) is None
+                            and getattr(mem, "fb_hook", None) is None
+                            and os.environ.get("XDJ_TDG_CFAST", "1") != "0"
+                            ) else 0
 
     def __getstate__(self):
         self._cs6_out()
@@ -428,7 +701,7 @@ class FastSH4:
             try:
                 d = self._cached_dspemu()
                 if self.core.cs6_fast:
-                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                    d.dspemu.hpia = self.core.cs6_addr  # C mirror owns HPIA
                 return d._cs6_read(a, 1) & 0xFF
             except Exception as e:
                 self._io_err = repr(e)
@@ -437,10 +710,10 @@ class FastSH4:
         is2dg = 0x04680000 <= a < 0x04690000
         try:
             if is2dg:
-                self._tdg_in()
+                self._tdg_out()
             v = self.mem.dev.read(a, 1) & 0xFF
             if is2dg:
-                self._tdg_out()
+                self._tdg_in()
             return v
         except Exception as e:           # a device bug must not kill the core
             self._io_err = repr(e)
@@ -457,7 +730,7 @@ class FastSH4:
             try:
                 d = self._cached_dspemu()
                 if self.core.cs6_fast:
-                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                    d.dspemu.hpia = self.core.cs6_addr  # C mirror owns HPIA
                 d._cs6_write(a, 1, v & 0xFF)
                 return                      # HPIC/HPIA never raise interrupts
             except Exception as e:
@@ -469,10 +742,10 @@ class FastSH4:
         try:
             before = len(dev.pending)
             if is2dg:
-                self._tdg_in()               # C mirror -> python regs first
+                self._tdg_out()              # C mirror -> python regs first
             dev.write(a, 1, v)
             if is2dg:
-                self._tdg_out()              # ...then python -> C mirror
+                self._tdg_in()               # ...then python -> C mirror
             if len(dev.pending) != before or (a & 0x1FFF0000) == 0x04080000:
                 self.core.io_break = 1
         except Exception as e:
@@ -489,11 +762,9 @@ class FastSH4:
         try:
             if cs6:
                 d = self._cached_dspemu()
-                if is2dg:
-                    self._tdg_in()
                 if not is2dg:
                     if self.core.cs6_fast:
-                        d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                        d.dspemu.hpia = self.core.cs6_addr  # C mirror owns HPIA
                     # The C64x co-simulation is time-locked PER WORD, not per
                     # byte: a 32-bit HPI access reads the same latched word
                     # four bytes would (auto-increment fires at the same
@@ -515,13 +786,13 @@ class FastSH4:
                 if fv is not None:
                     return fv
             if is2dg:
-                self._tdg_in()
+                self._tdg_out()
             v = 0
             dev_read = self.mem.dev.read
             for i in range(n):
                 v |= dev_read(a + i, 1) << (8 * i)
             if is2dg:
-                self._tdg_out()
+                self._tdg_in()
             return v
         except Exception as e:
             self._io_err = repr(e)
@@ -534,7 +805,7 @@ class FastSH4:
             try:
                 d = self._cached_dspemu()
                 if self.core.cs6_fast:
-                    d.hpia = self.core.cs6_addr   # C mirror owns HPIA
+                    d.dspemu.hpia = self.core.cs6_addr  # C mirror owns HPIA
                 # word-at-a-time for the aligned 16/32-bit HPI stores (the
                 # PCM pump): dspdev.write's size-n path assembles exactly
                 # what n byte writes would (RMW on HPIA/HPIC, word assembly
@@ -553,13 +824,13 @@ class FastSH4:
                 return
         is2dg = 0x04680000 <= a < 0x04690000
         if is2dg:
-            self._tdg_in()
+            self._tdg_out()
         try:
             before = len(dev.pending)
             for i in range(n):
                 dev.write(a + i, 1, (v >> (8 * i)) & 0xFF)
             if is2dg:
-                self._tdg_out()
+                self._tdg_in()
             if len(dev.pending) != before or (a & 0x1FFF0000) == 0x04080000:
                 self.core.io_break = 1
         except Exception as e:
@@ -652,11 +923,16 @@ class FastSH4:
         elif not want_fast and c.cs6_fast:
             c.cs6_fast = 0
             if de is not None:
+                h = c.cs6_addr               # keep the latch the core owned
                 de._cs6_mirror = None
+                de.hpia = h
+        self._tdg_attach()
+        self._dmac_attach()
         c.low_is_ram = 1 if mem.low_is_ram else 0
         c.fb_writes = 0
         done = u64()
         n = 0
+        slice_ = _slice()
         cref = ctypes.byref(c)
         try:
             while n < limit:
@@ -670,7 +946,7 @@ class FastSH4:
                     n += 1
                     continue
                 cte = dev.cycles_to_next_event()
-                k = min(limit - n, SLICE, cte if cte > 0 else 64)
+                k = min(limit - n, slice_, cte if cte > 0 else 64)
                 k = max(k, 1)
                 reason = lib.core_run(cref, k, ctypes.byref(done))
                 d = done.value

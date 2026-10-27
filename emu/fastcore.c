@@ -94,7 +94,8 @@ typedef struct {
     uint64_t tdg_dirty;         /* bit w set = tdg_reg[w] written since sync */
     uint64_t tdg_dirty_ssr;
     uint32_t tdg_py;            /* route ALL 2DG traffic to Python (rare) */
-    uint32_t tdg_pad;
+    uint32_t tdg_on;            /* mirror owns 0x00-0xFF (fastcpu.py syncs
+                                   it around every Python 2DG touch) */
     /* --- appended fields (fastcpu.py Core mirrors this layout) ---
      * CS6/DSP co-simulation accelerator (XDJ_DSP_CS6C, 2026-10-24): the
      * firmware's HPI traffic during play is ~220k crossings per emulated
@@ -116,6 +117,24 @@ typedef struct {
     uint32_t cur_pc;
     uint32_t cur_pad;
     uint64_t run_commit;
+    /* --- appended (fastcpu.py mirrors): DMAC register file shared with
+     * Python (2026-10-26). sh7724.py's dev.dma channel dicts become views
+     * onto these words while dmac_on, so C serves the firmware's CHCR
+     * polls and plain stores; a CHCR store that would start a transfer
+     * still crosses to Python (_dma_write runs it). Bases: 0 = 0xFE008000,
+     * 1 = 0xFDC08000, 2 = 0xFE009000; regs sar, dar, tcr, chcr. */
+    uint32_t dmac_on, dmac_pad;
+    uint32_t dmac[3][12][4];
+    uint32_t dmaor[3], dmaor_pad;
+    /* --- appended: 2DG lists started from C (tdg_cfast, 2026-10-26).
+     * LCOFS + the run counter mirror TDG.lcofs / TDG.runs (fastcpu syncs);
+     * irq_cb raises TDG_INI (0) / TDG_TRI (1) in Python; tdg_cont hands a
+     * list C cannot finish to the Python interpreter at (pc, ops). */
+    uint32_t tdg_cfast, tdg_runs_c;
+    int32_t tdg_lcx, tdg_lcy;
+    uint32_t tdg_lc_dirty, tdg_pad3;
+    void (*irq_cb)(uint32_t which);
+    void (*tdg_cont)(uint32_t pc, uint32_t ops);
 } Core;
 
 /* ------------------------------------------------------------------ */
@@ -232,6 +251,7 @@ static uint32_t tdg_r8(Core *c, uint32_t a)
     return c->io_rd(a) & 0xFFu;             /* off-mirror: rare */
 }
 
+static void tdg_sclr(Core *c);
 static void tdg_wr8(Core *c, uint32_t a, uint32_t v)
 {
     uint32_t off = a - TDG_BASE;
@@ -253,9 +273,14 @@ static void tdg_wr8(Core *c, uint32_t a, uint32_t v)
     }
     c->tdg_reg[w] = new;
     c->tdg_dirty |= 1ull << w;
-    if (w == 0 && (new & 1u)) {             /* SCLR start: run the list in
-        Python (side effects live there).  fastcpu's io_wr wrapper syncs
-        the mirror both ways around the real tdg.write. */
+    if (w == 0 && (new & 1u)) {             /* SCLR start */
+        if (c->tdg_cfast) {                 /* TDG.write: reg0 = 0, run */
+            c->tdg_reg[0] = 0;
+            tdg_sclr(c);
+            return;
+        }
+        /* run the list in Python (side effects live there); fastcpu's
+         * io_wr wrapper syncs the mirror both ways around tdg.write */
         c->io_wr(a, v & 0xFFu);
         c->io_break = 1;
         return;
@@ -330,6 +355,62 @@ static void cs6_wr8(Core *c, uint32_t a, uint32_t v)
     }
 }
 
+
+/* ------------------------- DMAC register file (shared) ----------------- */
+static inline int dmac_base(uint32_t p, uint32_t *off)
+{
+    uint32_t b;
+    if (p - 0xFE008000u < 0x200u) b = 0;
+    else if (p - 0xFDC08000u < 0x200u) b = 1;
+    else if (p - 0xFE009000u < 0x200u) b = 2;
+    else return -1;
+    *off = p & 0x1FFu;
+    return (int)b;
+}
+/* channel word for off (sh7724._dma_ch), or NULL */
+static inline uint32_t *dmac_word(Core *c, int b, uint32_t off)
+{
+    uint32_t ch;
+    if (off - 0x20u < 0x40u) ch = (off - 0x20u) >> 4;
+    else if (off - 0x70u < 0x80u) ch = ((off - 0x70u) >> 4) + 4u;
+    else return 0;
+    return &c->dmac[b][ch][(off & 0xCu) >> 2];
+}
+/* read n bytes at off (aligned within one word); 0 = not handled */
+static int dmac_rd(Core *c, uint32_t p, int n, uint32_t *v)
+{
+    uint32_t off; int b = dmac_base(p, &off);
+    if (b < 0 || !c->dmac_on) return 0;
+    uint32_t m = 0xFFFFFFFFu >> (32u - 8u * (uint32_t)n);
+    if (off == 0x60u) { *v = c->dmaor[b] & m; return 1; }
+    uint32_t *w = dmac_word(c, b, off);
+    if (!w) return 0;
+    *v = (*w >> (8u * (off & 3u))) & m;
+    return 1;
+}
+/* write n bytes; 0 = not handled (cross to Python unchanged) */
+static int dmac_wr(Core *c, uint32_t p, int n, uint32_t v)
+{
+    uint32_t off; int b = dmac_base(p, &off);
+    if (b < 0 || !c->dmac_on) return 0;
+    uint32_t sh = 8u * (off & 3u), m = (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n)) << sh;
+    if (off - 0x60u < 4u) {                       /* DMAOR, 16-bit RMW */
+        sh = 8u * (off - 0x60u); m = (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n)) << sh;
+        c->dmaor[b] = ((c->dmaor[b] & ~m) | ((v << sh) & m)) & 0xFFFFu;
+        return 1;
+    }
+    uint32_t *w = dmac_word(c, b, off);
+    if (!w) return 0;
+    if ((off & 0xCu) == 0xCu) {
+        /* CHCR: Python triggers a run after any byte store that leaves
+         * DE=1, TE=0 in the low byte -- those stores cross unchanged */
+        uint32_t lo = (off & 3u) == 0u ? v & 0xFFu : *w & 0xFFu;
+        if ((lo & 3u) == 1u) return 0;
+    }
+    *w = (*w & ~m) | ((v << sh) & m);
+    return 1;
+}
+
 static uint32_t rd8p(Core *c, uint32_t a)
 {
     int fb, ro;
@@ -340,6 +421,8 @@ static uint32_t rd8p(Core *c, uint32_t a)
     uint8_t *h = loc(c, a, &fb, &ro);
     if (h) return *h;
     if (a - CS6BASE < CS6SPAN) return cs6_rd8(c, a);
+    if (a - TDG_BASE < 0x100u && c->tdg_on) return tdg_r8(c, a);
+    { uint32_t dv; if (dmac_rd(c, a, 1, &dv)) return dv; }
     return c->io_rd(a) & 0xFF;
 }
 
@@ -363,6 +446,8 @@ static void wr8p(Core *c, uint32_t a, uint32_t v)
         return;
     }
     if (a - CS6BASE < CS6SPAN) { cs6_wr8(c, a, v); return; }
+    if (a - TDG_BASE < 0x100u && c->tdg_on) { tdg_wr8(c, a, v); return; }
+    if (dmac_wr(c, a, 1, v & 0xFFu)) return;
     c->io_wr(a, v & 0xFF);   /* the callback sets io_break if it matters */
 }
 
@@ -427,6 +512,12 @@ static inline uint32_t prd(Core *c, uint32_t p, int n)
                                   : c->io_rds(p, 2) & 0xFFFFu;
                 }
             }
+            { uint32_t dv; if (dmac_rd(c, p, n, &dv)) return dv; }
+            if (tp < 0x100u && c->tdg_on) {     /* 2DG register file */
+                uint32_t w = (tp >> 2) == 1u ? c->tdg_ssr : c->tdg_reg[tp >> 2];
+                return (w >> (8u * (tp & 3u))) &
+                       (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n));
+            }
             if (!loc(c, p + (uint32_t)n - 1u, &fb2, &ro2) &&
                 (dp >= CS6SPAN || p + (uint32_t)n <= CS6BASE + CS6SPAN))
                 return n == 4 ? c->io_rds(p, 4) & 0xFFFFFFFFu
@@ -454,6 +545,20 @@ static inline void pwr(Core *c, uint32_t p, int n, uint32_t v)
         if (n > 1 && (p & (uint32_t)(n - 1)) == 0) {
             int fb2, ro2;
             uint32_t dp = p - CS6BASE, tp = p - TDG_BASE;
+            if (dp - 0x40000u < 4u && c->cs6_py && c->cs6_fast &&
+                dp + (uint32_t)n <= 0x40004u) {   /* HPIA: pure mirror */
+                uint32_t sh = 8u * (dp - 0x40000u);
+                uint32_t m = (0xFFFFFFFFu >> (32u - 8u * (uint32_t)n)) << sh;
+                c->cs6_addr = (c->cs6_addr & ~m) | ((v << sh) & m);
+                return;
+            }
+            if (dmac_wr(c, p, n, v)) return;
+            if (tp < 0x100u && c->tdg_on && ((tp >> 2) != 0u || c->tdg_cfast)) {
+                /* same as n byte stores in order; SCLR (word 0) crosses */
+                for (int i = 0; i < n; i++)
+                    tdg_wr8(c, p + (uint32_t)i, (v >> (8 * i)) & 0xFFu);
+                return;
+            }
             if (!loc(c, p + (uint32_t)n - 1u, &fb2, &ro2)) {
                 if (n == 4) c->io_wrs(p, v, 4);
                 else c->io_wrs(p, v & 0xFFFFu, 2);
@@ -485,20 +590,116 @@ static inline uint32_t xlat(Core *c, uint32_t a)
     return 0;
 }
 
+/* 2026-10-26 data-page cache: host pointer of a recently used 4 KB page,
+ * keyed on (virtual page, SR.MD, low-flash mapping) -- exactly what xlat
+ * and loc depend on -- so a hit skips xlat/prd/loc and is the same access.
+ * Only pages that loc() maps wholly into one host buffer are cached
+ * (devices, CS6, 2DG, P4 never are). Stamped with a generation bumped at
+ * every core_run entry, so Python-side changes between runs (buffers,
+ * low_is_ram) can never be seen stale. XDJ_DTLB=0 (g_dtlb) turns it off. */
+#define DTLB_N 256u
+typedef struct { uint32_t key, gen; uint8_t *h; uint8_t fb, ro, code, pad[13]; } Dtlb;  /* 32 B: JIT indexes it; code = page holds blocks */
+static Dtlb g_dtlb_t[DTLB_N];
+static uint32_t g_dtlb_gen = 1;
+int g_dtlb = 1;
+void core_set_dtlb(int on) { g_dtlb = on; g_dtlb_gen++; }
+
+static inline uint32_t dkey(Core *c, uint32_t a)
+{
+    return (a & ~0xFFFu) | ((c->sr & MD) ? 1u : 0u) | (c->low_is_ram ? 2u : 0u);
+}
+/* Code-change tracking for the block engine (2026-10-26). A block checks
+ * its opcodes against memory only when g_vgen moved since its last check.
+ * g_vgen moves on every core_run entry (Python may have written anything
+ * between runs), after every slow-path access (devices: their callbacks
+ * can write RAM), after the native fast paths, and on every store into a
+ * host page that holds blocks (bit set in g_codepg, mirrored as Dtlb.code
+ * so the cached store paths -- C and JIT -- see it). Pages outside ram0 /
+ * ram1 are not tracked: their blocks always compare. */
+/* g_vgen and g_blk_epoch side by side: chained native code reads both
+ * through one base register (shjit.c) */
+static uint32_t g_jg[2] = { 1, 1 };
+#define g_vgen (g_jg[0])
+#define g_blk_epoch (g_jg[1])
+static uint8_t g_codepg[(2u * 0x04000000u) >> 15];      /* 1 bit / 4 KB page */
+static inline int codepg_idx(Core *c, const uint8_t *h)
+{
+    if ((uintptr_t)(h - c->ram0) < 0x04000000u) return (int)((h - c->ram0) >> 12);
+    if ((uintptr_t)(h - c->ram1) < 0x04000000u) return (int)(16384 + ((h - c->ram1) >> 12));
+    return -1;
+}
+static inline int codepg_get(Core *c, const uint8_t *h)
+{
+    int i = codepg_idx(c, h);
+    return i >= 0 && (g_codepg[i >> 3] >> (i & 7) & 1);
+}
+
+static inline Dtlb *dtlb_get(Core *c, uint32_t a)
+{
+    Dtlb *e = &g_dtlb_t[(a >> 12) & (DTLB_N - 1u)];
+    uint32_t k = dkey(c, a);
+    if (e->key == k && e->gen == g_dtlb_gen) return e;
+    if (!g_dtlb) return 0;
+    /* miss: translate exactly like the slow path would (a privilege
+     * fault here is the same fault the slow path raises first) */
+    uint32_t p = xlat(c, a) & ~0xFFFu;
+    if (p - 0xFF000000u < 0x1000u) return 0;
+    int fb, ro, fb2, ro2;
+    uint8_t *h = loc(c, p, &fb, &ro);
+    if (!h || loc(c, p + 0xFFFu, &fb2, &ro2) != h + 0xFFF || fb2 != fb || ro2 != ro)
+        return 0;
+    e->key = k; e->gen = g_dtlb_gen; e->h = h; e->fb = (uint8_t)fb; e->ro = (uint8_t)ro;
+    e->code = (uint8_t)codepg_get(c, h);
+    return e;
+}
+
+/* block engine write tracking (see blk_*): host address of the last
+ * page-cached store, and "a slow-path (device / uncached) access happened" */
+static const uint8_t *g_wlast;
+static int g_wslow;
+
 static inline uint32_t vrd(Core *c, uint32_t a, int n)
 {
+    if (!(a & (uint32_t)(n - 1))) {
+        Dtlb *e = dtlb_get(c, a);
+        if (e) {
+            uint8_t *h = e->h + (a & 0xFFFu);
+            if (n == 4) { uint32_t v; memcpy(&v, h, 4); return v; }
+            if (n == 2) { uint16_t v; memcpy(&v, h, 2); return v; }
+            return *h;
+        }
+    }
+    g_wslow = 1;                                 /* block engine: end the block */
     uint32_t p = xlat(c, a);
     if (n == 2 && (a & 1)) raise_exc(0x100, 0x0E0, 1, a);
     if (n == 4 && (a & 3)) raise_exc(0x100, 0x0E0, 1, a);
-    return prd(c, p, n);
+    uint32_t v = prd(c, p, n);
+    g_vgen++;                                    /* a device may have written RAM */
+    return v;
 }
 
 static inline void vwr(Core *c, uint32_t a, int n, uint32_t v)
 {
+    if (!(a & (uint32_t)(n - 1))) {
+        Dtlb *e = dtlb_get(c, a);
+        if (e) {
+            if (e->ro) return;                  /* flash: pwr ignores it too */
+            uint8_t *h = e->h + (a & 0xFFFu);
+            if (n == 4) memcpy(h, &v, 4);
+            else if (n == 2) { uint16_t s = (uint16_t)v; memcpy(h, &s, 2); }
+            else *h = (uint8_t)v;
+            if (e->fb) c->fb_writes += (uint64_t)n;
+            g_wlast = h;                         /* block engine: own-page check */
+            if (e->code) g_vgen++;               /* a page holding blocks changed */
+            return;
+        }
+    }
+    g_wslow = 1;                                 /* block engine: end the block */
     uint32_t p = xlat(c, a);
     if (n == 2 && (a & 1)) raise_exc(0x100, 0x0E0, 1, a);
     if (n == 4 && (a & 3)) raise_exc(0x100, 0x0E0, 1, a);
     pwr(c, p, n, v);
+    g_vgen++;
 }
 
 #define RD8(a)  vrd(c, (a), 1)
@@ -701,6 +902,7 @@ static void fmov32(Core *c, uint32_t w1, uint32_t w2, Res *res)
             uint32_t hi = FRRAW(0, n * 2), lo = FRRAW(0, n * 2 + 1);
             for (int k = 0; k < 4; k++) pwr(c, xlat(c, a + k), 1, (lo >> (8 * k)) & 0xFF);
             for (int k = 0; k < 4; k++) pwr(c, xlat(c, a + 4 + k), 1, (hi >> (8 * k)) & 0xFF);
+            g_vgen++;
         } else {
             WR32(a, FRRAW(bk, m));
         }
@@ -1052,12 +1254,543 @@ static void step(Core *c, uint32_t op, uint32_t nxt, Res *res)
 }
 
 /* --------------------------------------------------------------------- *
+ * Native fast paths for hot firmware loops (2026-10-25). Each one runs the
+ * loop's iterations directly in C with the exact register, memory, T,
+ * steps, cycles and iteration-count results of the generic interpreter;
+ * it bails out (returns 0, nothing changed) unless the loop's code bytes
+ * match, the iteration budget covers the whole loop, and every access of
+ * an iteration is plain RAM (checked before the iteration runs; a partial
+ * run stops at the loop head with the state of that iteration boundary).
+ * core_set_fastpath(0) turns them off (XDJ_FASTPATH=0).
+ * --------------------------------------------------------------------- */
+static int g_fastpath = 1;
+int g_fp_bail = 0;             /* last fastpath bail reason (debug) */
+uint64_t g_fp_bails[64];       /* per-reason counters (debug) */
+#define BAIL(r) do { g_fp_bail = (r); g_fp_bails[(r) & 63]++; return 0; } while (0)
+#define BAILB(r) do { g_fp_bail = (r); g_fp_bails[(r) & 63]++; break; } while (0)
+static uint64_t g_fp_hits, g_fp_iters;
+/* pc hit counters for tools (core_set_watch): off when g_watch_n == 0 */
+static uint32_t g_watch_n, g_watch_pc[16];
+static uint64_t g_watch_hit[16];
+void core_set_watch(int n, const uint32_t *pcs)
+{
+    g_watch_n = n < 0 ? 0 : n > 16 ? 16 : (uint32_t)n;
+    for (uint32_t i = 0; i < g_watch_n; i++) { g_watch_pc[i] = pcs[i]; g_watch_hit[i] = 0; }
+}
+uint64_t core_watch_hits(int i) { return (i >= 0 && i < 16) ? g_watch_hit[i] : 0; }
+void core_set_fastpath(int on) { g_fastpath = on; }
+uint64_t core_fastpath_hits(int which) { return which ? g_fp_iters : g_fp_hits; }
+int core_fp_bail(void) { return g_fp_bail; }
+void core_fp_bails(uint64_t *out) { for (int i = 0; i < 64; i++) out[i] = g_fp_bails[i]; }
+
+/* plain-RAM host pointer for a P0 address, or 0 */
+static inline uint8_t *ram_ptr(Core *c, uint32_t a, int n)
+{
+    if (a >= 0x20000000u || (a & (uint32_t)(n - 1))) return 0;
+    int fb, ro;
+    uint8_t *h = loc(c, a, &fb, &ro);
+    if (!h || fb || ro) return 0;
+    int fb2, ro2;
+    if (loc(c, a + (uint32_t)n - 1u, &fb2, &ro2) != h + n - 1) return 0;
+    return h;
+}
+
+/* same, but P2/P1 views allowed (physical RAM underneath) and framebuffer
+ * regions allowed (plain host RAM; caller counts fb_writes) */
+static inline uint8_t *ram_ptr_w(Core *c, uint32_t a, int n, int *fb_out)
+{
+    a &= 0x1FFFFFFFu;
+    if (a < 0x08000000u || a >= 0x20000000u || (a & (uint32_t)(n - 1))) return 0;
+    int fb, ro;
+    uint8_t *h = loc(c, a, &fb, &ro);
+    if (!h || ro) return 0;
+    int fb2, ro2;
+    if (loc(c, a + (uint32_t)n - 1u, &fb2, &ro2) != h + n - 1) return 0;
+    *fb_out |= fb;
+    return h;
+}
+
+/* centre-waveform layer copy, staging -> locked surface, two rows per pass
+ * (FUN_08DC3xxx release path, 0x08DC40B8..0x08DC40EE, 28 instructions) */
+static const uint16_t FP_WCOPY[28] = {
+    0x66f2, 0xe004, 0x52f1, 0x4018, 0x0467, 0x061a, 0x7402, 0x1f9a,
+    0x70f0, 0x4600, 0x362c, 0x6251, 0x367c, 0x2621, 0x62f2, 0x59f1,
+    0x0127, 0x061a, 0x7102, 0x025d, 0x35dc, 0x4600, 0x34e2, 0x369c,
+    0x59fa, 0x367c, 0x8fe4, 0x2621 };
+
+/* per loop-iteration unit (one core_run iteration each): steps, cycles.
+ * 26 single instructions (two mul.l = 2 cycles), then bf/s: taken = one
+ * unit with its slot (2 steps, 1 cycle); not taken = bf/s + slot as two
+ * one-cycle units. */
+static const uint8_t WC_CYC[26] = {1,1,1,1,2,1,1,1,1,1,1,1,1,1,1,1,2,1,1,1,1,1,1,1,1,1};
+
+static uint64_t fp_wcopy(Core *c, uint64_t budget, int *term)
+{
+    g_fp_bail = 1;
+    uint8_t *code = ram_ptr(c, 0x08DC40B8u, 2);
+    if (!code || memcmp(code, FP_WCOPY, sizeof FP_WCOPY)) BAIL(11);
+    g_fp_bail = 2;
+    uint32_t *R = c->r;
+    /* iterations until r4 (+2 each) >= r14 */
+    uint32_t r4 = R[4], kfull = 1;
+    while ((uint32_t)(r4 + 2u * kfull) < R[14]) {
+        if (++kfull > 0x100000u) return 0;
+    }
+    /* 2026-10-26: chunks shrink to the next device event, so a budget that
+     * covers the WHOLE loop is rare (this was 100 % of the bails). Run as
+     * many whole passes as fit; a partial run stops at the loop head with
+     * the state of that pass boundary (identical accounting either way). */
+    if (budget < 28ull) BAIL(3);
+    uint64_t kmax = (budget - 28ull) / 27ull + 1;
+    uint32_t k = kfull < kmax ? kfull : (uint32_t)kmax;
+    uint64_t it = 0;
+#define OVL(p, n, q, m) ((p) < (q) + (m) && (q) < (p) + (n))
+    for (uint32_t i = 0; i < k; i++) {
+        uint32_t sp = R[15] & 0x1FFFFFFFu, r5 = R[5] & 0x1FFFFFFFu;
+        int fbw = 0;
+        uint8_t *pw = ram_ptr_w(c, sp, 4, &fbw), *pd = ram_ptr_w(c, sp + 4, 4, &fbw);
+        int fb40v = 0;
+        uint8_t *p40 = ram_ptr_w(c, sp + 40, 4, &fb40v);
+        if (!pw || !pd || !p40) BAILB(20 + (!pw) + 2 * (!pd) + 4 * (!p40));
+        uint32_t W, D;
+        memcpy(&W, pw, 4); memcpy(&D, pd, 4);
+        uint32_t a1 = ((W * R[4]) << 1) + D + R[7];
+        uint32_t a2 = ((W * R[1]) << 1) + D + R[7];
+        /* fb_writes like the interpreter: bytes STORED into a framebuffer
+         * (2026-10-26: the old "+8 if any access touched a framebuffer"
+         * counted reads too and was off by 4 -> DSP time-lock drift) */
+        int fb40 = 0, fb1 = 0, fb2 = 0, fbr = 0;
+        uint8_t *ps1 = ram_ptr_w(c, r5, 2, &fbr), *pd1 = ram_ptr_w(c, a1, 2, &fb1),
+                *ps2 = ram_ptr_w(c, r5 + 0x3F0u, 2, &fbr), *pd2 = ram_ptr_w(c, a2, 2, &fb2);
+        if (!ps1 || !pd1 || !ps2 || !pd2) BAILB(30 + (!ps1) + 2 * (!pd1) + 4 * (!ps2) + 8 * (!pd2));
+        /* stores of the first half must not feed a later read of this pass
+         * (then the generic interpreter takes it) */
+        if (OVL(p40, 4, pw, 4) || OVL(p40, 4, pd, 4) || OVL(p40, 4, ps2, 2) ||
+            OVL(pd1, 2, pw, 4) || OVL(pd1, 2, pd, 4) || OVL(pd1, 2, ps2, 2) ||
+            OVL(pd1, 2, p40, 4))
+        BAILB(40);
+        uint32_t r9 = R[9];
+        int16_t v1, v2;
+        memcpy(p40, &r9, 4);                  /* mov.l r9,@(40,r15) */
+        memcpy(&v1, ps1, 2);
+        memcpy(pd1, &v1, 2);                  /* mov.w r2,@r6 */
+        memcpy(&v2, ps2, 2);
+        memcpy(pd2, &v2, 2);                  /* mov.w r2,@r6 (slot) */
+        (void)fb40; (void)fbr;
+        c->fb_writes += (fb40v ? 4 : 0) + (fb1 ? 2 : 0) + (fb2 ? 2 : 0);
+        c->macl = W * R[1];
+        R[0] = 0x3F0u;
+        R[1] += 2u;
+        R[2] = (uint32_t)(int32_t)v2;
+        R[4] += 2u;
+        R[5] = r5 + R[13];
+        R[6] = a2;
+        /* r9 = @(40,r15) = the r9 just stored */
+        if (R[4] >= R[14]) c->sr |= 1u; else c->sr &= ~1u;
+        it++;
+    }
+#undef OVL
+    if (it == 0) return 0;
+    *term = (it == kfull);
+    c->pc = (c->sr & 1u) ? 0x08DC40F0u : 0x08DC40B8u;
+    c->cur_pc = 0x08DC40EEu;
+    return it;                     /* loop passes */
+}
+
+/* firmware memset, 16-bytes-per-pass inner loop (0x08E1D994..0x08E1D9A0:
+ * 4x mov.l r7,@-r2 + add #-1,r5, cmp/pl r5, bt) -- all 1-cycle ops */
+static const uint16_t FP_MSET[7] = { 0x2276, 0x75ff, 0x2276, 0x2276, 0x2276, 0x4515, 0x89f8 };
+
+static uint64_t fp_memset(Core *c, uint64_t budget)
+{
+    uint8_t *code = ram_ptr(c, 0x08E1D994u, 2);
+    if (!code || memcmp(code, FP_MSET, sizeof FP_MSET)) return 0;
+    uint32_t *R = c->r;
+    uint32_t x = R[5];
+    uint64_t k = (int32_t)x >= 1 ? x : 1;
+    if (k > budget / 7) k = budget / 7;
+    if (!k) return 0;
+    /* the firmware clears through P2 (uncached) views as often as P1 --
+     * same RAM here (2026-10-26: the P2 check made every such call bail) */
+    uint32_t hi = R[2] & 0x1FFFFFFFu, lo = hi - (uint32_t)(16 * k);
+    uint32_t top = R[2] >> 29;          /* 0 plain, 4 = P1, 5 = P2 view */
+    if ((top && top != 4 && top != 5) || hi < 0x08000000u ||
+        hi >= 0x20000000u || (hi & 3u) || lo > hi) return 0;
+    if (lo < 0x08E1D9A2u && hi > 0x08E1D994u) return 0;    /* own code */
+    int fb, ro, fb2, ro2;
+    uint8_t *h = loc(c, lo, &fb, &ro), *h2 = loc(c, hi - 1u, &fb2, &ro2);
+    if (!h || ro || ro2 || fb != fb2 || h2 != h + (hi - 1u - lo)) return 0;
+    uint32_t v = R[7];
+    for (uint64_t i = 0; i < 4 * k; i++) memcpy(h + 4 * i, &v, 4);
+    if (fb) c->fb_writes += 16 * k;
+    R[2] = lo | (R[2] & 0xE0000000u);
+    R[5] = x - (uint32_t)k;
+    int t = (int32_t)R[5] > 0;
+    if (t) c->sr |= 1u; else c->sr &= ~1u;
+    c->pc = t ? 0x08E1D994u : 0x08E1D9A2u;
+    c->cur_pc = 0x08E1D9A0u;
+    return k;                      /* loop passes (7 one-cycle units each) */
+}
+
+/* --------------------------------------------------------------------- *
  * Run up to max_iter loop iterations (a branch + its delay slot is one, as
  * in sh4.py). *done receives the count. Stops early for: idle-task stack
  * checker (R_IDLE, pc left there), SLEEP (R_SLEEP), a device write or MMU
  * register write (R_IO, so Python can deliver interrupts promptly),
  * LDTLB / MMU on (R_FALLBACK, pc left at the instruction).
  * --------------------------------------------------------------------- */
+
+/* ------------------ decode-once table (2026-10-26) --------------------- *
+ * g_cls[op] = fast-path class of each 16-bit opcode, built once. The ~45
+ * hottest forms (about 90 % of executed instructions, measured on the
+ * real-DSP playing snapshot) run here with bodies copied from step();
+ * class 0 = everything else -> step(). Only forms with step() result
+ * K_NONE / K_TIMED / K_BR are here (no delay slots, no exceptions other
+ * than the memory faults step() raises the same way).
+ * Proven by core_fast_selftest (every classed opcode, random state, vs
+ * step()) and the differ A/B runs. XDJ_DTAB=0 -> core_set_dtab(0). */
+enum {
+    F_NONE, F_MOV, F_ADD, F_ADDI, F_MOVI, F_MOVLPC, F_MOVWPC, F_MOVL_LD,
+    F_MOVL_ST, F_MOVL_LDD, F_MOVL_STD, F_MOVL_POP, F_MOVL_PUSH, F_EXTUB,
+    F_EXTUW, F_TST, F_TSTI, F_BT, F_BF, F_MOVB_LD, F_MOVB_POP, F_MOVB_ST,
+    F_MOVW_LD, F_MOVW_ST, F_CMPEQ, F_CMPHS, F_CMPGE, F_CMPHI, F_CMPGT,
+    F_CMPEQI, F_SHAD, F_SHLD, F_AND, F_OR, F_XOR, F_ANDI, F_SHLL, F_SHLL2,
+    F_SHLL8, F_SHLL16, F_SHLR, F_SHLR2, F_SHLR8, F_SHLR16, F_SHAR, F_DT,
+    F_STSMACH, F_STSMACL, F_MULL, F_SUB, F_MOVL_LD0, F_MOVB_LD0, F_MOVL_ST0,
+    F_STSPR_PUSH, F_LDSPR_POP, F_EXTSB, F_EXTSW, F_CMPPL, F_CMPPZ, F_NEG,
+    F_NOT, F_MOVW_POP, F_MOVA, F_MOVLGBR, F_ORI,
+    /* 2026-10-26: the forms that still went through step() while playing */
+    F_MOVW_LD0, F_MOVB_LDD, F_MOVW_LDD, F_MOVB_STD8, F_MOVW_STD8,
+    F_MOVB_PUSH, F_MOVW_PUSH, F_STSFPSCR, F_LDSFPSCR, F_STSMACL_PUSH,
+    F_LDSMACL_POP, F_DMULU
+};
+/* cycles of a classed instruction (fast_step's return value) */
+static inline uint32_t cls_cyc(uint32_t k) { return k == F_MULL ? 2u : k == F_DMULU ? 3u : 1u; }
+static uint8_t g_cls[65536];
+static int g_dtab = 1, g_dtab_built = 0;
+void core_set_dtab(int on) { g_dtab = on; }
+
+static void dtab_build(void)
+{
+    for (uint32_t op = 0; op < 65536; op++) {
+        uint32_t h = op >> 12, lo4 = op & 0xF, lo8 = op & 0xFF, k = F_NONE;
+        switch (h) {
+        case 0x0:
+            if (lo4 == 0x7) k = F_MULL;
+            else if (lo8 == 0x0A || (op & 0xF0FF) == 0x000A) k = ((op & 0xF0FF) == 0x000A) ? F_STSMACH : F_NONE;
+            if ((op & 0xF0FF) == 0x001A) k = F_STSMACL;
+            if (lo4 == 0xE) k = F_MOVL_LD0;
+            if (lo4 == 0xC) k = F_MOVB_LD0;
+            if (lo4 == 0x6) k = F_MOVL_ST0;
+            if (lo4 == 0xD) k = F_MOVW_LD0;
+            if ((op & 0xF0FF) == 0x006A) k = F_STSFPSCR;
+            break;
+        case 0x1: k = F_MOVL_STD; break;
+        case 0x2:
+            switch (lo4) {
+            case 0x0: k = F_MOVB_ST; break; case 0x1: k = F_MOVW_ST; break;
+            case 0x2: k = F_MOVL_ST; break; case 0x6: k = F_MOVL_PUSH; break;
+            case 0x4: k = F_MOVB_PUSH; break; case 0x5: k = F_MOVW_PUSH; break;
+            case 0x8: k = F_TST; break; case 0x9: k = F_AND; break;
+            case 0xA: k = F_XOR; break; case 0xB: k = F_OR; break;
+            }
+            break;
+        case 0x3:
+            switch (lo4) {
+            case 0x0: k = F_CMPEQ; break; case 0x2: k = F_CMPHS; break;
+            case 0x3: k = F_CMPGE; break; case 0x6: k = F_CMPHI; break;
+            case 0x7: k = F_CMPGT; break; case 0x8: k = F_SUB; break;
+            case 0xC: k = F_ADD; break;
+            case 0x5: k = F_DMULU; break;
+            }
+            break;
+        case 0x4:
+            switch (lo8) {
+            case 0x00: k = F_SHLL; break; case 0x08: k = F_SHLL2; break;
+            case 0x18: k = F_SHLL8; break; case 0x28: k = F_SHLL16; break;
+            case 0x01: k = F_SHLR; break; case 0x09: k = F_SHLR2; break;
+            case 0x19: k = F_SHLR8; break; case 0x29: k = F_SHLR16; break;
+            case 0x21: k = F_SHAR; break; case 0x10: k = F_DT; break;
+            case 0x11: k = F_CMPPZ; break; case 0x15: k = F_CMPPL; break;
+            case 0x22: k = F_STSPR_PUSH; break; case 0x26: k = F_LDSPR_POP; break;
+            case 0x12: k = F_STSMACL_PUSH; break; case 0x16: k = F_LDSMACL_POP; break;
+            case 0x6A: k = F_LDSFPSCR; break;
+            }
+            if (lo4 == 0xC) k = F_SHAD;
+            if (lo4 == 0xD) k = F_SHLD;
+            break;
+        case 0x5: k = F_MOVL_LDD; break;
+        case 0x6:
+            switch (lo4) {
+            case 0x0: k = F_MOVB_LD; break; case 0x1: k = F_MOVW_LD; break;
+            case 0x2: k = F_MOVL_LD; break; case 0x3: k = F_MOV; break;
+            case 0x4: k = F_MOVB_POP; break; case 0x5: k = F_MOVW_POP; break;
+            case 0x6: k = F_MOVL_POP; break; case 0x7: k = F_NOT; break;
+            case 0xB: k = F_NEG; break; case 0xC: k = F_EXTUB; break;
+            case 0xD: k = F_EXTUW; break; case 0xE: k = F_EXTSB; break;
+            case 0xF: k = F_EXTSW; break;
+            }
+            break;
+        case 0x7: k = F_ADDI; break;
+        case 0x8:
+            switch ((op >> 8) & 0xF) {
+            case 0x8: k = F_CMPEQI; break; case 0x9: k = F_BT; break;
+            case 0x0: k = F_MOVB_STD8; break; case 0x1: k = F_MOVW_STD8; break;
+            case 0x4: k = F_MOVB_LDD; break; case 0x5: k = F_MOVW_LDD; break;
+            case 0xB: k = F_BF; break;
+            }
+            break;
+        case 0x9: k = F_MOVWPC; break;
+        case 0xC:
+            switch (op & 0xFF00) {
+            case 0xC700: k = F_MOVA; break; case 0xC800: k = F_TSTI; break;
+            case 0xC900: k = F_ANDI; break; case 0xCB00: k = F_ORI; break;
+            case 0xC600: k = F_MOVLGBR; break;
+            }
+            break;
+        case 0xD: k = F_MOVLPC; break;
+        case 0xE: k = F_MOVI; break;
+        }
+        g_cls[op] = (uint8_t)k;
+    }
+    g_dtab_built = 1;
+}
+
+/* returns the instruction's cycle count; *br != 0 -> taken branch to *tgt */
+static inline uint32_t fast_step(Core *c, uint32_t op, uint32_t k, int *br, uint32_t *tgt)
+{
+    uint32_t *R = c->r;
+    uint32_t n = (op >> 8) & 0xF, m = (op >> 4) & 0xF, i8 = op & 0xFF, v;
+    switch (k) {
+    case F_MOV: R[n] = R[m]; return 1;
+    case F_ADD: R[n] += R[m]; return 1;
+    case F_SUB: R[n] -= R[m]; return 1;
+    case F_ADDI: R[n] += S8(i8); return 1;
+    case F_MOVI: R[n] = S8(i8); return 1;
+    case F_MOVLPC: R[n] = RD32(((c->pc + 4) & ~3u) + i8 * 4); return 1;
+    case F_MOVWPC: R[n] = S16(RD16(c->pc + 4 + i8 * 2)); return 1;
+    case F_MOVA: R[0] = ((c->pc + 4) & ~3u) + i8 * 4; return 1;
+    case F_MOVL_LD: R[n] = RD32(R[m]); return 1;
+    case F_MOVW_LD: R[n] = S16(RD16(R[m])); return 1;
+    case F_MOVB_LD: R[n] = S8(RD8(R[m])); return 1;
+    case F_MOVL_ST: WR32(R[n], R[m]); return 1;
+    case F_MOVW_ST: WR16(R[n], R[m]); return 1;
+    case F_MOVB_ST: WR8(R[n], R[m] & 0xFF); return 1;
+    case F_MOVL_LDD: R[n] = RD32(R[m] + (op & 0xF) * 4); return 1;
+    case F_MOVL_STD: WR32(R[n] + (op & 0xF) * 4, R[m]); return 1;
+    case F_MOVL_POP: v = RD32(R[m]); R[n] = v; if (n != m) R[m] += 4; else R[m] = v + 4; return 1;
+    case F_MOVW_POP: v = S16(RD16(R[m])); R[n] = v; if (n != m) R[m] += 2; else R[m] = v + 2; return 1;
+    case F_MOVB_POP: v = S8(RD8(R[m])); R[n] = v; if (n != m) R[m] += 1; else R[m] = v + 1; return 1;
+    case F_MOVL_PUSH: R[n] -= 4; WR32(R[n], R[m]); return 1;
+    case F_MOVL_LD0: R[n] = RD32(R[0] + R[m]); return 1;
+    case F_MOVB_LD0: R[n] = S8(RD8(R[0] + R[m])); return 1;
+    case F_MOVL_ST0: WR32(R[0] + R[n], R[m]); return 1;
+    case F_MOVLGBR: R[0] = RD32(c->gbr + i8 * 4); return 1;
+    case F_EXTUB: R[n] = R[m] & 0xFF; return 1;
+    case F_EXTUW: R[n] = R[m] & 0xFFFF; return 1;
+    case F_EXTSB: R[n] = S8(R[m]); return 1;
+    case F_EXTSW: R[n] = S16(R[m]); return 1;
+    case F_NOT: R[n] = ~R[m]; return 1;
+    case F_NEG: R[n] = 0 - R[m]; return 1;
+    case F_TST: SETT((R[n] & R[m]) == 0); return 1;
+    case F_TSTI: SETT((R[0] & i8) == 0); return 1;
+    case F_AND: R[n] &= R[m]; return 1;
+    case F_OR: R[n] |= R[m]; return 1;
+    case F_XOR: R[n] ^= R[m]; return 1;
+    case F_ANDI: R[0] &= i8; return 1;
+    case F_ORI: R[0] |= i8; return 1;
+    case F_CMPEQ: SETT(R[n] == R[m]); return 1;
+    case F_CMPHS: SETT(R[n] >= R[m]); return 1;
+    case F_CMPGE: SETT((int32_t)R[n] >= (int32_t)R[m]); return 1;
+    case F_CMPHI: SETT(R[n] > R[m]); return 1;
+    case F_CMPGT: SETT((int32_t)R[n] > (int32_t)R[m]); return 1;
+    case F_CMPEQI: SETT(R[0] == S8(i8)); return 1;
+    case F_CMPPZ: SETT(!(R[n] >> 31)); return 1;
+    case F_CMPPL: SETT(R[n] != 0 && !(R[n] >> 31)); return 1;
+    case F_BT: if (T()) { *br = 1; *tgt = c->pc + S8(i8) * 2 + 4; } return 1;
+    case F_BF: if (!T()) { *br = 1; *tgt = c->pc + S8(i8) * 2 + 4; } return 1;
+    case F_SHAD: {
+        uint32_t s = R[m];
+        if (!(s >> 31)) R[n] <<= (s & 0x1F);
+        else if (!(s & 0x1F)) R[n] = ((int32_t)R[n] < 0) ? 0xFFFFFFFFu : 0;
+        else R[n] = (uint32_t)((int32_t)R[n] >> (((~s) & 0x1F) + 1));
+        return 1;
+    }
+    case F_SHLD: {
+        uint32_t s = R[m];
+        if (!(s >> 31)) R[n] <<= (s & 0x1F);
+        else if (!(s & 0x1F)) R[n] = 0;
+        else R[n] >>= (((~s) & 0x1F) + 1);
+        return 1;
+    }
+    case F_SHLL: SETT(R[n] >> 31); R[n] <<= 1; return 1;
+    case F_SHLR: SETT(R[n] & 1); R[n] >>= 1; return 1;
+    case F_SHAR: SETT(R[n] & 1); R[n] = (uint32_t)((int32_t)R[n] >> 1); return 1;
+    case F_SHLL2: R[n] <<= 2; return 1;
+    case F_SHLL8: R[n] <<= 8; return 1;
+    case F_SHLL16: R[n] <<= 16; return 1;
+    case F_SHLR2: R[n] >>= 2; return 1;
+    case F_SHLR8: R[n] >>= 8; return 1;
+    case F_SHLR16: R[n] >>= 16; return 1;
+    case F_DT: R[n] -= 1; SETT(R[n] == 0); return 1;
+    case F_STSMACH: R[n] = c->mach; return 1;
+    case F_STSMACL: R[n] = c->macl; return 1;
+    case F_MULL: c->macl = R[n] * R[m]; return 2;
+    case F_STSPR_PUSH: R[n] -= 4; WR32(R[n], c->pr); return 1;
+    case F_LDSPR_POP: c->pr = RD32(R[n]); R[n] += 4; return 1;
+    case F_MOVW_LD0: R[n] = S16(RD16(R[0] + R[m])); return 1;
+    case F_MOVB_LDD: R[0] = S8(RD8(R[m] + (op & 0xF))); return 1;
+    case F_MOVW_LDD: R[0] = S16(RD16(R[m] + (op & 0xF) * 2)); return 1;
+    case F_MOVB_STD8: WR8(R[m] + (op & 0xF), R[0] & 0xFF); return 1;
+    case F_MOVW_STD8: WR16(R[m] + (op & 0xF) * 2, R[0]); return 1;
+    case F_MOVB_PUSH: R[n] -= 1; WR8(R[n], R[m] & 0xFF); return 1;
+    case F_MOVW_PUSH: R[n] -= 2; WR16(R[n], R[m]); return 1;
+    case F_STSFPSCR: R[n] = c->fpscr; return 1;
+    case F_LDSFPSCR: c->fpscr = R[n]; return 1;
+    case F_STSMACL_PUSH: R[n] -= 4; WR32(R[n], c->macl); return 1;
+    case F_LDSMACL_POP: c->macl = RD32(R[n]); R[n] += 4; return 1;
+    case F_DMULU: { uint64_t p = (uint64_t)R[n] * R[m];
+        c->macl = (uint32_t)p; c->mach = (uint32_t)(p >> 32); return 3; }
+    }
+    return 0;
+}
+
+
+/* -------------------- block engine, stage 1 (2026-10-26) ---------------- *
+ * A block = a straight run of up to BMAX instructions that the decode-once
+ * table handles (g_cls != 0), ending at the first other instruction, after
+ * a bt/bf, at a 4 KB page end, or BEFORE any pc the run loop treats
+ * specially (idle loop, native fast paths, the low-flash switch). Blocks
+ * run inside core_run with the same locals, so the step/cycle accounting,
+ * the COMMIT points, io_break and fault semantics are the interpreter's
+ * own. Code can change under a block at any time (our mods, the firmware
+ * copying code, DMA): every entry compares the block's opcodes with the
+ * live memory (rebuild on any difference), and inside a block a store
+ * into the block's own code page, or any slow-path (device / uncached)
+ * access, ends the block right after that instruction. Key = (pc, MD,
+ * low-flash map) + buffer epoch + idle pc. XDJ_BLOCKS=0 -> off. */
+#define BLK_BITS 18
+#define BLK_N (1u << BLK_BITS)
+/* slot of a block: halfword index folded with the bits above the table
+ * span, so hot code exactly 512 KB apart no longer shares a slot (the
+ * plain index thrashed ~470k rebuilds per second while playing) */
+#define BLK_IDX(pc) ((((pc) >> 1) ^ ((pc) >> (1 + BLK_BITS))) & (BLK_N - 1u))
+#define BMAX 32
+typedef struct Blk_ {
+    uint32_t pc, key, epoch, idle;
+    uint16_t n, first;                   /* first = opcode at pc (n == 0 blocks) */
+    uint32_t hot;                        /* stage-1 runs (JIT threshold) */
+    const uint8_t *host;                 /* host base of the code page */
+    uint32_t (*fn)(Core *);              /* compiled code (shjit.c) or NULL */
+    uint8_t tkind;                       /* T_* delayed branch at ops[n], slot ops[n+1] */
+    uint8_t vchk;                        /* page tracked by g_codepg */
+    uint32_t vgen;                       /* g_vgen of the last opcode check */
+    uint16_t ops[BMAX + 2];
+    uint8_t k[BMAX + 2];                 /* class; 0 = the branch of a terminator */
+} Blk;
+/* delayed-branch terminators (core_run's K_DBR path) */
+enum { T_NONE, T_BRA, T_BSR, T_RTS, T_JSR, T_JMP, T_BSRF, T_BRAF, T_BTS, T_BFS };
+static inline int blk_term(uint32_t op)
+{
+    if ((op & 0xF000u) == 0xA000u) return T_BRA;
+    if ((op & 0xF000u) == 0xB000u) return T_BSR;
+    if ((op & 0xF0FFu) == 0x000Bu) return T_RTS;
+    if ((op & 0xF0FFu) == 0x400Bu) return T_JSR;
+    if ((op & 0xF0FFu) == 0x402Bu) return T_JMP;
+    if ((op & 0xF0FFu) == 0x0003u) return T_BSRF;
+    if ((op & 0xF0FFu) == 0x0023u) return T_BRAF;
+    if ((op & 0xFF00u) == 0x8D00u) return T_BTS;
+    if ((op & 0xFF00u) == 0x8F00u) return T_BFS;
+    return T_NONE;
+}
+static Blk g_blk[BLK_N];
+static int g_blk_on = 1;
+static uint8_t *g_blk_bufs[7];
+static uint64_t g_blk_runs, g_blk_insns, g_blk_builds;
+void core_set_blocks(int on) { g_blk_on = on; g_blk_epoch++; }
+uint64_t core_blk_stat(int k) { return k == 0 ? g_blk_runs : k == 1 ? g_blk_insns : g_blk_builds; }
+
+static inline int blk_is_mem(uint32_t k)
+{
+    switch (k) {
+    case F_MOVLPC: case F_MOVWPC: case F_MOVL_LD: case F_MOVW_LD: case F_MOVB_LD:
+    case F_MOVL_ST: case F_MOVW_ST: case F_MOVB_ST: case F_MOVL_LDD: case F_MOVL_STD:
+    case F_MOVL_POP: case F_MOVW_POP: case F_MOVB_POP: case F_MOVL_PUSH:
+    case F_MOVL_LD0: case F_MOVB_LD0: case F_MOVL_ST0: case F_MOVLGBR:
+    case F_STSPR_PUSH: case F_LDSPR_POP:
+    case F_MOVW_LD0: case F_MOVB_LDD: case F_MOVW_LDD: case F_MOVB_STD8: case F_MOVW_STD8:
+    case F_MOVB_PUSH: case F_MOVW_PUSH: case F_STSMACL_PUSH: case F_LDSMACL_POP:
+        return 1;
+    }
+    return 0;
+}
+
+static inline int blk_special(Core *c, uint32_t pc)
+{
+    return (pc & 0x1FFFFFFFu) == c->idle_pc || pc == 0x08DC40B8u || pc == 0x08E1D994u ||
+           pc == 0xA8000800u;
+}
+
+static void blk_build(Core *c, Blk *b, uint32_t pc, uint32_t key, const uint16_t *page)
+{
+    g_blk_builds++;
+    b->pc = pc; b->key = key; b->epoch = g_blk_epoch; b->idle = c->idle_pc;
+    b->host = (const uint8_t *)page;
+    b->fn = 0; b->hot = 0;
+    /* mark the page as holding blocks: stores into it from now on move
+     * g_vgen (the cached store paths read Dtlb.code) */
+    {
+        int pi = codepg_idx(c, (const uint8_t *)page);
+        b->vchk = pi >= 0;
+        if (pi >= 0 && !(g_codepg[pi >> 3] >> (pi & 7) & 1)) {
+            g_codepg[pi >> 3] |= (uint8_t)(1u << (pi & 7));
+            for (uint32_t q = 0; q < DTLB_N; q++)
+                if (g_dtlb_t[q].h == (uint8_t *)page) g_dtlb_t[q].code = 1;
+        }
+        b->vgen = g_vgen;
+    }
+    b->first = page[(pc & 0xFFFu) >> 1];
+    int n = 0;
+    for (uint32_t a = pc; n < BMAX; a += 2) {
+        if (n && ((a & 0xFFFu) == 0 || blk_special(c, a))) break;
+        uint32_t op = page[(a & 0xFFFu) >> 1];
+        uint32_t k = g_cls[op];
+        if (!k) break;
+        b->ops[n] = (uint16_t)op; b->k[n] = (uint8_t)k;
+        n++;
+        if (k == F_BT || k == F_BF) break;
+    }
+    b->n = (uint16_t)n;
+    b->tkind = T_NONE;
+    /* a delayed branch + an ordinary slot instruction close the block when
+     * both sit on this page and neither pc is one the run loop watches */
+    uint32_t a = pc + 2u * (uint32_t)n;
+    if (n < BMAX && !(n && (b->k[n - 1] == F_BT || b->k[n - 1] == F_BF)) &&
+        (a & 0xFFFu) <= 0xFFCu && (!n || !blk_special(c, a)) && !blk_special(c, a + 2)) {
+        uint32_t bop = page[(a & 0xFFFu) >> 1], sop = page[((a + 2) & 0xFFFu) >> 1];
+        int t = blk_term(bop);
+        uint32_t sk = g_cls[sop];
+        if (t && sk && sk != F_BT && sk != F_BF && !blk_term(sop)) {
+            b->tkind = (uint8_t)t;
+            b->ops[n] = (uint16_t)bop; b->k[n] = 0;
+            b->ops[n + 1] = (uint16_t)sop; b->k[n + 1] = (uint8_t)sk;
+        }
+    }
+}
+static inline uint32_t blk_len(const Blk *b) { return b->n + (b->tkind ? 2u : 0u); }
+
+/* buffers moved (Python re-bound them): forget every block */
+static inline void blk_check_bufs(Core *c)
+{
+    uint8_t *now[7] = { c->ram0, c->ram1, c->fb0, c->fb1, c->misc, c->sq, c->flash };
+    if (memcmp(now, g_blk_bufs, sizeof now)) {
+        memcpy(g_blk_bufs, now, sizeof now);
+        g_blk_epoch++;
+    }
+}
+
+#include "shjit.c"
+
 int core_run(Core *c, uint64_t max_iter, uint64_t *done)
 {
     /* Hot-loop bookkeeping lives in locals, committed to the Core every
@@ -1071,11 +1804,19 @@ int core_run(Core *c, uint64_t max_iter, uint64_t *done)
      * both sides of any A/B) and bounded by COMMIT cycles of tick time.
      * The intervening steps/cycles are under-counted, never over. */
     enum { COMMIT = 64 };
+    uint32_t f_key = 0xFFFFFFFFu;            /* fetch shortcut (see below) */
+    const uint16_t *f_host = 0;
     uint64_t it = 0, steps = 0, cycles = 0;
     int reason = R_LIMIT;
     c->io_break = 0;
     g_fallback = 0;
     c->run_commit = 0;
+    g_dtlb_gen++;
+    g_vgen++;
+    if (!g_dtab_built) dtab_build();
+    const int fk_on = g_dtab;
+    blk_check_bufs(c);
+    const int blk_on = g_blk_on && fk_on;
     if (c->mmucr & 1) { *done = 0; return R_FALLBACK; }
 
     if (setjmp(g_jb)) {
@@ -1095,9 +1836,174 @@ int core_run(Core *c, uint64_t max_iter, uint64_t *done)
         uint32_t pc = c->pc;
         if (!c->low_is_ram && pc == 0xA8000800u) c->low_is_ram = 1;
         if (c->idle_skip && (pc & 0x1FFFFFFFu) == c->idle_pc) { reason = R_IDLE; break; }
+        if (g_fastpath && (pc == 0x08DC40B8u || pc == 0x08E1D994u)) {
+            /* replay the interpreter's per-iteration accounting exactly
+             * (incl. the COMMIT points the DSP clock reads) */
+            if (pc == 0x08DC40B8u) {
+                int term = 0;
+                uint64_t n = fp_wcopy(c, max_iter - it, &term);
+                if (n) {
+                    g_fp_hits++; g_fp_iters += n; g_vgen++;
+                    /* the per-unit replay, done in runs between COMMIT points:
+                     * same totals and the same values committed at each
+                     * boundary (2026-10-26; nothing can look at the counters
+                     * inside a native fast path) */
+                    static uint16_t ps[2][29], pcy[2][29];
+                    static int pinit;
+                    if (!pinit) {
+                        for (int t = 0; t < 2; t++) {
+                            ps[t][0] = pcy[t][0] = 0;
+                            for (int u = 0; u < 26; u++) {
+                                ps[t][u + 1] = (uint16_t)(ps[t][u] + 1);
+                                pcy[t][u + 1] = (uint16_t)(pcy[t][u] + WC_CYC[u]);
+                            }
+                            if (t == 0) { ps[0][27] = (uint16_t)(ps[0][26] + 2); pcy[0][27] = (uint16_t)(pcy[0][26] + 1); }
+                            else {
+                                ps[1][27] = (uint16_t)(ps[1][26] + 1); pcy[1][27] = (uint16_t)(pcy[1][26] + 1);
+                                ps[1][28] = (uint16_t)(ps[1][27] + 1); pcy[1][28] = (uint16_t)(pcy[1][27] + 1);
+                            }
+                        }
+                        pinit = 1;
+                    }
+                    for (uint64_t i = 0; i < n; i++) {
+                        int t = term && i + 1 == n;
+                        uint32_t units = t ? 28u : 27u, pos = 0;
+                        while (pos < units) {
+                            uint32_t room = COMMIT - (uint32_t)(it & (COMMIT - 1u));
+                            uint32_t take = units - pos < room ? units - pos : room;
+                            steps += ps[t][pos + take] - ps[t][pos];
+                            cycles += pcy[t][pos + take] - pcy[t][pos];
+                            it += take; pos += take;
+                            if ((it & (COMMIT - 1u)) == 0u) { c->run_commit = it;
+                                c->steps += steps; c->cycles += cycles; steps = cycles = 0; }
+                        }
+                    }
+                    continue;
+                }
+            } else {
+                uint64_t n = fp_memset(c, max_iter - it);
+                if (n) {
+                    g_fp_hits++; g_fp_iters += n; g_vgen++;
+                    uint64_t left = 7 * n;                 /* units of (1, 1), in runs */
+                    while (left) {
+                        uint64_t room = COMMIT - (it & (COMMIT - 1u));
+                        uint64_t take = left < room ? left : room;
+                        steps += take; cycles += take; it += take; left -= take;
+                        if ((it & (COMMIT - 1u)) == 0u) { c->run_commit = it;
+                            c->steps += steps; c->cycles += cycles; steps = cycles = 0; }
+                    }
+                    continue;
+                }
+            }
+        }
+        if (g_watch_n) {
+            for (uint32_t w = 0; w < g_watch_n; w++)
+                if (g_watch_pc[w] == pc) g_watch_hit[w]++;
+        }
         c->cur_pc = pc;
-        uint32_t op = RD16(pc);
+        /* 2026-10-26 fetch shortcut: the host pointer of the current 4 KB
+         * code page, valid while privilege (MD) and the low-flash mapping
+         * are unchanged -- one load instead of xlat + loc per instruction.
+         * Odd pcs and non-RAM pages take the full path (same faults). */
+        uint32_t op;
+        uint32_t fkey = (pc & ~0xFFFu) | ((c->sr & MD) ? 1u : 0u) | (c->low_is_ram ? 2u : 0u);
+        if (fkey == f_key && !(pc & 1u)) {
+            op = (uint32_t)f_host[(pc & 0xFFFu) >> 1];
+        } else {
+            op = RD16(pc);
+            f_key = 0xFFFFFFFFu;
+            if (!(pc & 1u) && g_fastpath) {
+                uint32_t p = xlat(c, pc);
+                int fb, ro;
+                uint8_t *h = loc(c, p & ~0xFFFu, &fb, &ro);
+                int fb2, ro2;
+                if (h && !fb && loc(c, (p & ~0xFFFu) + 0xFFEu, &fb2, &ro2) == h + 0xFFE) {
+                    f_host = (const uint16_t *)h;
+                    f_key = fkey;
+                }
+            }
+        }
+        if (blk_on && f_key == fkey && !(pc & 1u) && !g_watch_n) {
+            Blk *b = &g_blk[BLK_IDX(pc)];
+            const uint16_t *hp = f_host + ((pc & 0xFFFu) >> 1);
+            if (b->pc != pc || b->key != fkey || b->epoch != g_blk_epoch ||
+                b->idle != c->idle_pc || b->host != (const uint8_t *)f_host)
+                blk_build(c, b, pc, fkey, f_host);
+#ifdef SHJIT
+            else if (b->fn && g_jit_on && !g_watch_n && it + blk_len(b) <= max_iter &&
+                     (it & (COMMIT - 1u)) + blk_len(b) < COMMIT) {
+                /* compiled: the code checks its own opcodes on entry */
+                JCtx x = { it, steps, cycles, max_iter, 0, 0 };
+                jit_enter(c, (void *)b->fn, &x);
+                g_jit_calls++;
+                g_jit_its += x.it - it;
+                it = x.it; steps = x.steps; cycles = x.cycles;
+                if (x.flags & 1u) { reason = R_IO; goto out; }
+                /* flags 2: a block's code changed; it unhooked itself */
+                continue;
+            }
+#endif
+            else if (!b->vchk || b->vgen != g_vgen) {
+                if (blk_len(b) ? memcmp(hp, b->ops, (size_t)blk_len(b) * 2u) != 0 : hp[0] != b->first)
+                    blk_build(c, b, pc, fkey, f_host);
+                else b->vgen = g_vgen;
+            }
+            uint32_t bn = b->n;
+#ifdef SHJIT
+            /* native code, when the longest path fits the slice and no
+             * COMMIT point falls inside it */
+            uint32_t units = blk_len(b);
+            if (units >= 2 && g_jit_on && !g_watch_n) {
+                if (!b->fn && ++b->hot >= JIT_HOT) jit_compile(c, b);
+                if (b->fn && it + units <= max_iter && (it & (COMMIT - 1u)) + units < COMMIT) {
+                    JCtx x = { it, steps, cycles, max_iter, 0, 0 };
+                    jit_enter(c, (void *)b->fn, &x);
+                    g_jit_calls++;
+                    g_jit_its += x.it - it;
+                    it = x.it; steps = x.steps; cycles = x.cycles;
+                    if (x.flags) { reason = R_IO; goto out; }
+                    continue;
+                }
+            }
+#endif
+            if (bn >= 2 && it + bn <= max_iter) {
+                uint32_t bp = pc;
+                g_blk_runs++;
+                for (uint32_t j = 0; j < bn; j++) {
+                    c->pc = bp; c->cur_pc = bp;
+                    int br = 0; uint32_t tgt = 0;
+                    int mem = blk_is_mem(b->k[j]);
+                    if (mem) { g_wslow = 0; g_wlast = 0; }
+                    uint32_t cy = fast_step(c, b->ops[j], b->k[j], &br, &tgt);
+                    steps++; cycles += cy; it++;
+                    g_blk_insns++;
+                    if ((it & (COMMIT - 1u)) == 0u) {
+                        c->run_commit = it;
+                        c->steps += steps;
+                        c->cycles += cycles;
+                        steps = cycles = 0;
+                    }
+                    if (br) { bp = tgt; break; }
+                    bp += 2;
+                    if (c->io_break) { c->pc = bp; reason = R_IO; goto out; }
+                    if (mem && (g_wslow ||
+                                (uintptr_t)(g_wlast - b->host) < 0x1000u)) break;
+                }
+                c->pc = bp;
+                continue;
+            }
+        }
         uint32_t nxt = pc + 2;
+        if (fk_on) {
+            uint32_t k = g_cls[op];
+            if (k) {
+                int br = 0; uint32_t tgt = 0;
+                uint32_t cy = fast_step(c, op, k, &br, &tgt);
+                c->pc = br ? tgt : nxt;
+                steps++; cycles += cy;
+                goto tail;
+            }
+        }
         Res r;
         step(c, op, nxt, &r);
         if (g_fallback) { c->pc = pc; reason = R_FALLBACK; break; }
@@ -1125,6 +2031,7 @@ int core_run(Core *c, uint64_t max_iter, uint64_t *done)
             break;
         }
         }
+    tail:
         it++;
         if ((it & (COMMIT - 1u)) == 0u) {
             c->run_commit = it;
@@ -1174,3 +2081,357 @@ int core_add_dsp_region(Core *c, uint32_t base, uint32_t len, void *ptr)
 }
 
 int core_sizeof(void) { return (int)sizeof(Core); }
+
+/* --------------------------------------------------------------------- *
+ * 2DG display-list executor in C (2026-10-26). Exact port of
+ * emu/tdg.py TDG.run's ops (fill / blit / textured quad / polygon / line,
+ * WPR, LCOFS, MOVE, NOP/INTERRUPT, SYNC, TRAP) for lists whose memory is
+ * plain host RAM. Python stays authoritative: it passes its registers in,
+ * gets back the words C changed, the SSR bits, interrupts to raise and the
+ * framebuffer byte count -- and on anything this code does not handle
+ * (unknown op, WPR outside 0x000-0x0FC, memory that is not plain RAM) it
+ * stops BEFORE that op and Python continues the same list from stop_pc.
+ * Every op validates all of its memory before writing a single pixel, so a
+ * stop never leaves an op half done.
+ * --------------------------------------------------------------------- */
+typedef struct {
+    uint32_t reg[64];           /* in/out: registers 0x000..0x0FC */
+    uint64_t dirty;             /* out: words written by WPR */
+    int32_t lcx, lcy;           /* in/out: LCOFS */
+    uint32_t ssr_or;            /* out: SSR bits to set */
+    uint32_t irq_ini, irq_tri;  /* out: interrupts to raise (count / flag) */
+    uint32_t stop_pc;           /* out: where Python continues (fallback) */
+    uint32_t ops;               /* out: ops executed */
+    uint64_t fb_bytes;          /* out: framebuffer bytes written */
+} TdgIO;
+
+static inline int32_t s16(uint32_t v) { return (int32_t)(int16_t)(v & 0xFFFFu); }
+static inline uint32_t tphys(uint32_t a)
+{
+    return (a - 0x80000000u < 0x40000000u) ? (a & 0x1FFFFFFFu) : a;
+}
+/* host pointer for [a, a+n) as one plain buffer; writable: not flash */
+static uint8_t *thost(Core *c, int64_t a, int64_t n, int writable, int *fb)
+{
+    if (a < 0 || a > 0xFFFFFFFFll || n <= 0) return 0;
+    uint32_t p = tphys((uint32_t)a);
+    int f1, r1, f2, r2;
+    uint8_t *h = loc(c, p, &f1, &r1);
+    if (!h || (writable && r1)) return 0;
+    uint8_t *h2 = loc(c, p + (uint32_t)(n - 1), &f2, &r2);
+    if (h2 != h + (n - 1) || f1 != f2) return 0;
+    if (fb) *fb = f1;
+    return h;
+}
+static int trd(Core *c, uint32_t a, uint32_t *v)
+{
+    uint8_t *h = thost(c, a, 4, 0, 0);
+    if (!h || (tphys(a) & 3u)) return 0;     /* unaligned: Python's job */
+    memcpy(v, h, 4);
+    return 1;
+}
+#define REG(o) (io->reg[(o) >> 2])
+
+static void tclip(TdgIO *io, uint32_t flags, int32_t *x1, int32_t *y1, int32_t *x2, int32_t *y2)
+{
+    uint32_t smax = REG(0xD0);
+    *x1 = 0; *y1 = 0;
+    if (smax) { *x2 = s16(smax >> 16); *y2 = s16(smax); }
+    else { *x2 = 0x7FFF; *y2 = 0x7FFF; }
+    if (flags & 0x2000u) {
+        int32_t cx1 = s16(REG(0xD4) >> 16), cy1 = s16(REG(0xD4));
+        int32_t cx2 = s16(REG(0xD8) >> 16), cy2 = s16(REG(0xD8));
+        if (cx1 > *x1) *x1 = cx1;
+        if (cy1 > *y1) *y1 = cy1;
+        if (cx2 < *x2) *x2 = cx2;
+        if (cy2 < *y2) *y2 = cy2;
+    }
+}
+
+/* 0 = done, -1 = cannot (nothing written) */
+static int tfill(Core *c, TdgIO *io, uint32_t flags, uint32_t colour,
+                 int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    uint32_t dst = REG(0x50);
+    int64_t stride = REG(0x5C) ? (int64_t)REG(0x5C) : 800;
+    x += io->lcx; y += io->lcy;
+    int32_t cx1, cy1, cx2, cy2;
+    tclip(io, flags, &cx1, &cy1, &cx2, &cy2);
+    int32_t xa = x > cx1 ? x : cx1, xb = (x + w - 1) < cx2 ? (x + w - 1) : cx2;
+    int32_t ya = y > cy1 ? y : cy1, yb = (y + h - 1) < cy2 ? (y + h - 1) : cy2;
+    if (xa > xb || ya > yb) return 0;
+    int64_t a0 = (int64_t)dst + ((int64_t)ya * stride + xa) * 2;
+    int64_t n = (((int64_t)(yb - ya)) * stride + (xb - xa + 1)) * 2;
+    int fb = 0;
+    uint8_t *h0 = thost(c, a0, n, 1, &fb);
+    if (!h0 || (a0 & 1)) return -1;
+    uint16_t c16 = (uint16_t)colour;
+    for (int32_t yy = ya; yy <= yb; yy++) {
+        uint8_t *row = h0 + ((int64_t)(yy - ya) * stride) * 2;
+        for (int32_t xx = 0; xx <= xb - xa; xx++) memcpy(row + 2 * xx, &c16, 2);
+    }
+    if (fb) io->fb_bytes += (uint64_t)(yb - ya + 1) * (uint64_t)(xb - xa + 1) * 2;
+    return 0;
+}
+
+static int tblit(Core *c, TdgIO *io, uint32_t flags, int32_t sx, int32_t sy,
+                 int32_t x, int32_t y, int32_t w, int32_t h)
+{
+    uint32_t src = REG(0x4C), dst = REG(0x50);
+    int64_t sstride = REG(0x58) ? (int64_t)REG(0x58) : 800;
+    int64_t dstride = REG(0x5C) ? (int64_t)REG(0x5C) : 800;
+    x += io->lcx; y += io->lcy;
+    int32_t cx1, cy1, cx2, cy2;
+    tclip(io, flags, &cx1, &cy1, &cx2, &cy2);
+    int keyed = (flags & 0x0800u) != 0;
+    uint16_t key = (uint16_t)REG(0x80);
+    int32_t ya = y > cy1 ? y : cy1, yb = (y + h - 1) < cy2 ? (y + h - 1) : cy2;
+    int32_t xa = x > cx1 ? x : cx1, xb = (x + w - 1) < cx2 ? (x + w - 1) : cx2;
+    if (ya > yb || xa > xb) return 0;
+    int32_t rows = yb - ya + 1, cols = xb - xa + 1;
+    int64_t s0 = (int64_t)src + (((int64_t)sy + (ya - y)) * sstride + sx + (xa - x)) * 2;
+    int64_t d0 = (int64_t)dst + ((int64_t)ya * dstride + xa) * 2;
+    int fbs = 0, fbd = 0;
+    uint8_t *hs = thost(c, s0, (((int64_t)rows - 1) * sstride + cols) * 2, 0, &fbs);
+    uint8_t *hd = thost(c, d0, (((int64_t)rows - 1) * dstride + cols) * 2, 1, &fbd);
+    if (!hs || !hd || (s0 & 1) || (d0 & 1)) return -1;
+    static uint16_t tmp[4096];
+    if (cols > 4096) return -1;
+    for (int32_t j = 0; j < rows; j++) {            /* ascending rows, each row
+        read before written = the Python row path (and its vectorised path
+        when the rectangles do not overlap) */
+        uint8_t *sr = hs + (int64_t)j * sstride * 2, *dr = hd + (int64_t)j * dstride * 2;
+        memcpy(tmp, sr, (size_t)cols * 2);
+        if (!keyed) memcpy(dr, tmp, (size_t)cols * 2);
+        else
+            for (int32_t i = 0; i < cols; i++)
+                if (tmp[i] != key) memcpy(dr + 2 * i, &tmp[i], 2);
+    }
+    if (fbd) io->fb_bytes += (uint64_t)rows * (uint64_t)cols * 2;
+    return 0;
+}
+
+static int tquad(Core *c, TdgIO *io, uint32_t flags, int32_t sx, int32_t sy,
+                 int32_t sw, int32_t sh, const int32_t *px, const int32_t *py)
+{
+    int32_t x0 = px[0], y0 = py[0], x1 = px[0], y1 = py[0];
+    for (int k = 1; k < 4; k++) {
+        if (px[k] < x0) x0 = px[k];
+        if (px[k] > x1) x1 = px[k];
+        if (py[k] < y0) y0 = py[k];
+        if (py[k] > y1) y1 = py[k];
+    }
+    int32_t w = x1 - x0 + 1, h = y1 - y0 + 1;
+    if (sw <= 0 || sh <= 0) return 0;
+    if (w == sw && h == sh) return tblit(c, io, flags, sx, sy, x0, y0, w, h);
+    uint32_t src = REG(0x4C), dst = REG(0x50);
+    int64_t sstride = REG(0x58) ? (int64_t)REG(0x58) : 800;
+    int64_t dstride = REG(0x5C) ? (int64_t)REG(0x5C) : 800;
+    int32_t ox = io->lcx, oy = io->lcy;
+    int32_t cx1, cy1, cx2, cy2;
+    tclip(io, flags, &cx1, &cy1, &cx2, &cy2);
+    int keyed = (flags & 0x0800u) != 0;
+    uint16_t key = (uint16_t)REG(0x80);
+    if (w > 4096 || sw > 4096) return -1;
+    /* validate every row first (nothing written on a stop) */
+    int fb = 0, any = 0;
+    for (int32_t j = 0; j < h; j++) {
+        int32_t yy = y0 + j + oy;
+        if (yy < cy1 || yy > cy2) continue;
+        int64_t sa = (int64_t)src + (((int64_t)sy + (int64_t)j * sh / h) * sstride + sx) * 2;
+        int64_t da = (int64_t)dst + ((int64_t)yy * dstride + x0 + ox) * 2;
+        int f2 = 0;
+        if (!thost(c, sa, (int64_t)sw * 2, 0, 0) || !thost(c, da, (int64_t)w * 2, 1, &f2)
+            || (sa & 1) || (da & 1))
+            return -1;
+        fb |= f2; any = 1;
+    }
+    (void)any;
+    static uint16_t sv[4096], dv[4096];
+    for (int32_t j = 0; j < h; j++) {
+        int32_t yy = y0 + j + oy;
+        if (yy < cy1 || yy > cy2) continue;
+        int64_t sa = (int64_t)src + (((int64_t)sy + (int64_t)j * sh / h) * sstride + sx) * 2;
+        int64_t da = (int64_t)dst + ((int64_t)yy * dstride + x0 + ox) * 2;
+        int f2 = 0;
+        uint8_t *hs = thost(c, sa, (int64_t)sw * 2, 0, 0);
+        uint8_t *hd = thost(c, da, (int64_t)w * 2, 1, &f2);
+        memcpy(sv, hs, (size_t)sw * 2);
+        memcpy(dv, hd, (size_t)w * 2);
+        for (int32_t i = 0; i < w; i++) {
+            int32_t xx = i + x0 + ox;
+            if (xx < cx1 || xx > cx2) continue;
+            uint16_t s = sv[(int64_t)i * sw / w];
+            if (keyed && s == key) continue;
+            dv[i] = s;
+        }
+        memcpy(hd, dv, (size_t)w * 2);
+        if (f2) io->fb_bytes += (uint64_t)w * 2;
+    }
+    return 0;
+}
+
+static int tline(Core *c, TdgIO *io, uint32_t flags, uint32_t colour,
+                 const int32_t *px, const int32_t *py, uint32_t n)
+{
+    /* validate: each point fill must be possible -- done lazily: a stop on
+     * a later point would leave earlier points drawn, so check all first */
+    TdgIO save = *io;
+    for (uint32_t k = 0; k + 1 < n; k++) {
+        int32_t x0 = px[k], y0 = py[k], x1 = px[k + 1], y1 = py[k + 1];
+        int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1, dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
+        int32_t sxs = x0 < x1 ? 1 : -1, sys_ = y0 < y1 ? 1 : -1, err = dx + dy;
+        for (;;) {
+            /* dry check of the 1x1 fill */
+            uint32_t dst = REG(0x50);
+            int64_t stride = REG(0x5C) ? (int64_t)REG(0x5C) : 800;
+            int32_t cx1, cy1, cx2, cy2;
+            tclip(io, flags, &cx1, &cy1, &cx2, &cy2);
+            int32_t xx = x0 + io->lcx, yy = y0 + io->lcy;
+            if (xx >= cx1 && xx <= cx2 && yy >= cy1 && yy <= cy2) {
+                int64_t a = (int64_t)dst + ((int64_t)yy * stride + xx) * 2;
+                if (!thost(c, a, 2, 1, 0) || (a & 1)) return -1;
+            }
+            if (x0 == x1 && y0 == y1) break;
+            int32_t e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sxs; }
+            if (e2 <= dx) { err += dx; y0 += sys_; }
+        }
+    }
+    *io = save;
+    for (uint32_t k = 0; k + 1 < n; k++) {
+        int32_t x0 = px[k], y0 = py[k], x1 = px[k + 1], y1 = py[k + 1];
+        int32_t dx = x1 > x0 ? x1 - x0 : x0 - x1, dy = -(y1 > y0 ? y1 - y0 : y0 - y1);
+        int32_t sxs = x0 < x1 ? 1 : -1, sys_ = y0 < y1 ? 1 : -1, err = dx + dy;
+        for (;;) {
+            tfill(c, io, flags, colour, x0, y0, 1, 1);
+            if (x0 == x1 && y0 == y1) break;
+            int32_t e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x0 += sxs; }
+            if (e2 <= dx) { err += dx; y0 += sys_; }
+        }
+    }
+    return 0;
+}
+
+/* returns 0 = list finished (TRAP or op limit), 1 = stopped: Python
+ * continues at io->stop_pc */
+int core_tdg_run(Core *c, uint32_t addr, TdgIO *io, uint32_t limit)
+{
+    uint32_t pc = addr, n = 0;
+    io->dirty = 0; io->ssr_or = 0; io->irq_ini = 0; io->irq_tri = 0;
+    io->ops = 0; io->fb_bytes = 0; io->stop_pc = 0;
+    /* no setjmp here: this runs NESTED inside core_run (SCLR write ->
+     * Python -> here) and must not clobber its jmp_buf; nothing below
+     * can longjmp (loc() never raises) */
+#define STOP() do { io->stop_pc = pc; return 1; } while (0)
+#define RD(a, v) do { if (!trd(c, (a), (v))) STOP(); } while (0)
+    while (n < limit) {
+        n++;
+        uint32_t w;
+        RD(pc, &w);
+        uint32_t op = w >> 24, flags = w & 0x00FFFFFFu;
+        if (op == 0x00) {
+            io->ssr_or |= 1u;
+            if (REG(0x0C) & 1u) io->irq_tri = 1;
+            io->ops++;
+            return 0;
+        } else if (op == 0x18) {
+            uint32_t r, v;
+            RD(pc + 4, &r); RD(pc + 8, &v);
+            r &= 0xFFFFu;
+            if (r >= 0x100u || (r & 3u)) STOP();
+            io->reg[r >> 2] = v;
+            io->dirty |= 1ull << (r >> 2);
+            pc += 12;
+        } else if (op == 0x40) {
+            uint32_t v; RD(pc + 4, &v);
+            io->lcx = s16(v >> 16); io->lcy = s16(v);
+            pc += 8;
+        } else if (op == 0x48) {
+            pc += 8;
+        } else if (op == 0x08) {
+            if (w & 0x8000u) io->irq_ini++;
+            pc += 4;
+        } else if (op == 0x12) {
+            pc += 4;
+        } else if (op == 0xA0) {
+            uint32_t col, lr, ud, xy;
+            RD(pc + 8, &col); RD(pc + 12, &lr); RD(pc + 16, &ud); RD(pc + 20, &xy);
+            int32_t l = s16(lr >> 16), r = s16(lr), u = s16(ud >> 16), d = s16(ud);
+            int32_t x = s16(xy >> 16), y = s16(xy);
+            if (tfill(c, io, flags, col, x - l, y - u, l + r + 1, u + d + 1)) STOP();
+            pc += 24;
+        } else if (op == 0xA2) {
+            uint32_t sxy, lr, ud, xy;
+            RD(pc + 8, &sxy); RD(pc + 12, &lr); RD(pc + 16, &ud); RD(pc + 20, &xy);
+            int32_t l = s16(lr >> 16), r = s16(lr), u = s16(ud >> 16), d = s16(ud);
+            int32_t sx = s16(sxy >> 16), sy = s16(sxy), x = s16(xy >> 16), y = s16(xy);
+            if (tblit(c, io, flags, sx - l, sy - u, x - l, y - u, l + r + 1, u + d + 1)) STOP();
+            pc += 24;
+        } else if (op == 0x82) {
+            uint32_t sxy, swh, p[4];
+            RD(pc + 4, &sxy); RD(pc + 8, &swh);
+            for (int k = 0; k < 4; k++) RD(pc + 16 + 4 * k, &p[k]);
+            int32_t px[4], py[4];
+            for (int k = 0; k < 4; k++) { px[k] = s16(p[k] >> 16); py[k] = s16(p[k]); }
+            if (tquad(c, io, flags, s16(sxy >> 16), s16(sxy), s16(swh >> 16), s16(swh), px, py))
+                STOP();
+            pc += 32;
+        } else if (op == 0x80) {
+            uint32_t col, p[4];
+            RD(pc + 4, &col);
+            for (int k = 0; k < 4; k++) RD(pc + 8 + 4 * k, &p[k]);
+            int32_t x0 = s16(p[0] >> 16), y0 = s16(p[0]), x1 = x0, y1 = y0;
+            for (int k = 1; k < 4; k++) {
+                int32_t xx = s16(p[k] >> 16), yy = s16(p[k]);
+                if (xx < x0) x0 = xx;
+                if (xx > x1) x1 = xx;
+                if (yy < y0) y0 = yy;
+                if (yy > y1) y1 = yy;
+            }
+            if (tfill(c, io, flags, col, x0, y0, x1 - x0 + 1, y1 - y0 + 1)) STOP();
+            pc += 24;
+        } else if (op == 0xB0) {
+            uint32_t cw; RD(pc + 4, &cw);
+            uint32_t cnt = cw & 0xFFFFu;
+            if (cnt > 256) STOP();
+            int32_t px[256], py[256];
+            for (uint32_t k = 0; k < cnt; k++) {
+                uint32_t v; RD(pc + 12 + 4 * k, &v);
+                px[k] = s16(v >> 16); py[k] = s16(v);
+            }
+            if (tline(c, io, flags, cw >> 16, px, py, cnt)) STOP();
+            pc += 12 + 4 * cnt;
+        } else {
+            STOP();                            /* unknown: Python reports it */
+        }
+        io->ops++;
+    }
+#undef STOP
+#undef RD
+    return 0;                                  /* op limit (as Python) */
+}
+
+/* SCLR start from C (tdg_cfast): same effects, in the same order, as the
+ * Python path TDG.write -> TDG.run -> fastcpu._tdg_cexec */
+static void tdg_sclr(Core *c)
+{
+    TdgIO io;
+    memcpy(io.reg, c->tdg_reg, sizeof io.reg);
+    io.lcx = c->tdg_lcx; io.lcy = c->tdg_lcy;
+    c->tdg_runs_c++;
+    int r = core_tdg_run(c, c->tdg_reg[0x48u >> 2], &io, 200000u);
+    for (uint32_t w = 0; w < 64; w++)
+        if (io.dirty >> w & 1u) c->tdg_reg[w] = io.reg[w];
+    c->tdg_dirty |= io.dirty;
+    if (io.lcx != c->tdg_lcx || io.lcy != c->tdg_lcy) {
+        c->tdg_lcx = io.lcx; c->tdg_lcy = io.lcy; c->tdg_lc_dirty = 1;
+    }
+    c->fb_writes += io.fb_bytes;
+    if (io.ssr_or) { c->tdg_ssr |= io.ssr_or; c->tdg_dirty_ssr = 1; }
+    for (uint32_t i = 0; i < io.irq_ini; i++) c->irq_cb(0);
+    if (io.irq_tri) c->irq_cb(1);
+    if (io.irq_ini || io.irq_tri) c->io_break = 1;
+    if (r) c->tdg_cont(io.stop_pc, io.ops);   /* sets io_break itself */
+}

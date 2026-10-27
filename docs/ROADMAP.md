@@ -46,6 +46,18 @@ whenever they're needed.
   finger up (the hit-tester sometimes stopped before its countdown;
   KQTAB/KSDRAW moved +0x48/+0x20); emulator audio work from 10-24.
 
+## salvofly after 0.9.8 (2026-10-25 night): "only the PERFORM meter fixed"
+- 0.9.8 shipped BEFORE the deck-measured phase-meter position fix (it read
+  track length 0x0C0E6D1C -> frozen); fixed for 1.0. Linked-deck overlap
+  still open on our own deck (needs pm_probe in the linked state).
+- LIKELY ROOT of the "only one player" reports: every tool opened the
+  FIRST HID device with the XDJ-700 VID/PID, so with two decks on one PC an
+  install could split across both. Fixed for 1.0: open_deck pins one deck
+  by serial per process (XDJ_DECK_SERIAL selects), refuses when several
+  are connected; Studio shows "Two decks are connected" and disables the
+  install. Asked him: linked? both on USB while installing? file type for
+  the key-shift freeze, D-H cues, what "N" is.
+
 ## Open tester reports -- after 0.9.8 (salvofly, 2026-10-25)
 - Key shift + MT freeze + "corrupted file": NOT reproduced (emu real DSP:
   MP3 +-2, WAV +2/-6/+6 pitch exact, no DSP error; stock DSP with a tagged
@@ -160,25 +172,125 @@ whenever they're needed.
   tools/permanent_build.py, tools/permanent_extras_emu.py).
 - PREREQ: one real flash of a basic permanent file going fine.
 
-## Next: emulator speed (own branch, user-agreed 2026-10-25)
-- Hot-loop shortcuts first (bulk copy/fill, HPI polling: ~1.5-2x), then
-  an SH-4 recompiler, each step bit-checked against the interpreter.
+## Deck session 2026-10-25 (results)
+- Install from the downloaded 0.9.8 app: works, 30 min (estimate wrong).
+- UTILITY rows: WORK on hardware.
+- Phase meter: read the wrong word -- 0x0C0E6D1C is the TRACK LENGTH
+  (frozen); the live track position is 0x0C0E6D18 (1/150 s, follows the
+  tempo; tools/clock_hunt.py at +10% tempo). Fixed + emulator-checked
+  (tools/phasemeter_dsp_test.py on the real-audio-chip emulator, which
+  agrees with the deck). Draw gate now = background right of the meter ==
+  reference (200, blue row) -- the stock meter lights a marker at x 254
+  when a LINKED deck is master; MENU popup no longer overdrawn.
+- DECK 1 FROZE TWICE (pads + phase meter only) while deck 2 played a
+  track loaded FROM DECK 1's STICK over LINK; deck 2 then went to
+  emergency loop (its source died). Suspect: mods reading the ANLZ context
+  [0x09826BE4] that the link server reuses for the served track. Guards
+  added (pointer/length range checks, read-twice) to pm.c, the RGB
+  snapshot (rgb_detail COPY5), cw.c snap7 and hc.c find_cue. Bisect the
+  same day: pads alone + link = fine; pads + guarded meter + link = NO
+  FREEZE (was frozen twice with the unguarded meter) -> the old meter's
+  unguarded grid copy is the likely cause.
+- Stock meter overlapping ours while a linked deck plays: each stock row
+  repaint is its own small flush request (2DG list: one op-0x82 textured
+  quad, 216x20 at (258,117|138)+dy). pm_hook now NOPs that one command
+  while our meter is visible (call itself unchanged: the caller treats a
+  skipped call as an error). Emulator: 154 stripped, 0 reach the screen.
+  Needs one deck look. Next deck session: (1) pads only + link test, (2) pads +
+  guarded meter + link test, (3) full set + link test.
+- Key shift: right-channel noise again on AIFF while shifting (clean at
+  0; MP3 was clean on 10-18). Emulator WAV: no L/R difference.
+- FLAC: deck froze on LOAD (browse -> push).
+- Hot cues: user wants D-H on every track (set them on the deck) ->
+  needs our own storage on the stick (same file-open RE as the loader).
+- Requests: app redesign (Ready to mod -> choose method: cable install /
+  USB-stick file / firmware UPD), light + dark mode (app AND a deck light
+  theme), FX tab (mockup screenshots/mockups/fx_tab.png) for 1.1.
 
-## 1.0
-- Everything on the list proven on a deck, installed from the downloaded app.
+## 0.9.9 (user requests during the 10-25 deck session)
+- Mods page: plain install boxes only -- drop the single-theme picker +
+  "Send to deck" and the waveform style buttons (both are chosen ON the
+  deck: UTILITY / MY SETTINGS); one hint line pointing at hold-MENU UTILITY.
+- FLAC unticked by default ("only if your library has .flac files"); Opus
+  split from FLAC and only offered when the library has .opus files (our
+  stems files are WAV/AIFF, they don't need it).
+- Install estimate: real FLAC session count + measured s/session, never
+  rising; progress bar by expected work, not step count (FLAC showed 37%
+  at 2/3 done).
+- Faster FLAC upload: compressed transfer (tiny unpacker first), skip the
+  empty-memory check once remembered per deck.
+- Emulator page: one "Apply mods" button instead of the repeated choices;
+  hide Settings > Project folder in the downloadable app.
+- "Waveform colours only" UPD preset must tick the centre waveform.
+
+## Next: emulator speed (own branch, user-agreed 2026-10-25; PAUSED)
+- Measured 2026-10-25 (wavplay snapshot, M5): 10.9% of real time, SH is
+  the bottleneck (54.6 Mcyc/s). SH time by area: 0x08DC4000 27% (centre
+  waveform painter + its staging->surface copy loop 0x08DC40B8..EE, one
+  pixel per iteration), 0x08E1C000 17% (unknown, check next), 0x08DBC000
+  12.5% (overview painter), 0x08DC0000 11% -> over half is software
+  waveform drawing.
+- Plan: (1) native C fast paths for those few hot loops, entered at the
+  loop head, exact registers/memory/step counts (differ A/B must stay
+  identical); (2) threaded/pre-decoded SH interpreter (2-3x); (3) JIT
+  only if still needed. DSP core is already ~96% of real time.
+- Light deck theme: user likes the "ideal" mockup
+  (screenshots/mockups/light_theme.png) -> needs the firmware's own text
+  colours (track name, time, BPM) found and themed; research item.
+
+## 0.99 (tiny, fixes only -- user-agreed 2026-10-26)
+1. Windows UPD-build fix for the tester (he rebuilt the exe; the user says
+   the cause is already fixed in our code). OPEN: no commit for it was
+   found in git on 2026-10-26 -- find/commit it before building 0.99.
+2. Install talks to one deck only (54f751d).
+3. Phase meter reads the live position (0.9.8 shipped it frozen).
+Nothing else. Gates (tester_pack_test + public_app_test), Mac + Windows
+builds, publish as inter55 (only on the user's go).
+News: a tester flashed our permanent UPD (v1.16) on a real player; RGB
+overview, beat jump, key shift, stems, extended hot cues all worked.
+
+## 1.0 ("crazy update", user-agreed 2026-10-26)
+- Light mode on the deck + in the app.
+- Near-instant stem mute (well under 0.5 s): rewrite the DSP's cached
+  decoded blocks at the tap, not at the next read burst (~5 s today).
+- 8 hot cues settable on the deck (own storage on the stick).
+- Phase meter master row (second linked deck).
+- USB-stick install mode: usbloader flashed once via the UPD + a "mods
+  pack" builder. One-time flash approved "if u can guarantee it works":
+  exhaustive emulator proof, recovery path written down first, careful
+  first deck flash with a boot test.
+- The new 3-mode app (cable / USB stick / firmware UPD).
+- Bug list proven on the deck: FLAC load freeze, key shift right-channel
+  noise on AIFF, BJ 32/64, lit-button theme stripes (+ light mode, 8 hot
+  cues confirmed on hardware).
+- Faster emulator (nice-to-have, not a blocker; work in progress, see
+  docs/EMU_REALTIME.md).
+- TOUCH FX tab on PERFORM (design APPROVED; mockup
+  screenshots/mockups/touch_fx_deck.png, 800x480): new tab in the left
+  column under PERFORM; big X/Y pad with crosshair + soft glow under the
+  finger (NO animated backgrounds -- heavy redraws froze the deck before);
+  value + ring far left; right side 2x4 FX grid, DEPTH slider, FX ON, HOLD
+  (lift finger = off unless HOLD); colours follow the deck theme.
+  8 effects (pad X / Y): Filter (cutoff/resonance), Echo (time/feedback,
+  needs a DSP buffer), Pitch (semitones/mix, reuses key shift), Crush
+  (bits/rate), Gate (beat division/depth), Flanger (rate/depth), Roll
+  (beat length/mix, maybe the deck's loop engine), Reverb (size/mix,
+  hardest; may slip to 1.1 with the screen unchanged). The XDJ-700 has
+  NO built-in FX: every effect is new C6x DSP code in the key-shift style
+  (ks.c hook, hot install). Order easy -> hard; prove each in the
+  real-DSP emulator (dsp_pitch_probe-style A/B) before any deck test.
+- Waveform colours that follow the theme (deck side).
 - Windows out of beta (after a successful Windows install by a person).
-- Phase meter fixed on the deck + master deck's row from Pro DJ Link.
-- Track filter (BPM range + compatible keys in BROWSE) IF a short research
-  pass (emulator only) says it's doable; else 1.1. Lead: the deck already
-  reads PIONEER/rekordbox/RBFLTR.DAT.
+- OneLibrary converter (exportLibrary.db -> export.pdb).
+- MAYBE: track filter (only if a research pass says doable; lead: the deck
+  reads PIONEER/rekordbox/RBFLTR.DAT), custom home screen (if possible).
 - Refreshed site + README.
 
 ## 1.1 and later (ideas)
 - Track filter (if it missed 1.0).
 - Waveform preview next to track names in BROWSE (Reddit request; data is
   on the stick). Audio preview in the browser: unlikely (one playback path).
-- FX pads on the touch screen, Link over USB, more hot cue/loop pages,
-  custom home screens.
+- Link over USB, more hot cue/loop pages. Reverb if it slips from 1.0.
 
 ## Not planned
 - StreamingDirectPlay (partner logins/DRM). Other decks: XDJ-700 only.

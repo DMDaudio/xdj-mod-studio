@@ -7,7 +7,7 @@
 # VF_OPUS=0 builds FLAC only.
 set -e
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
-OUT=$ROOT/build/xflac
+OUT=${VF_OUT:-$ROOT/build/xflac}
 SH=$ROOT/work/sh-tools/bin
 BASE=${VF_BASE:-0x09970000}
 LIMIT=0x09A00000
@@ -35,7 +35,7 @@ fi
   -ffunction-sections -fdata-sections $DEFS $INC \
   -nostdlib -Wl,--gc-sections -Wl,-e,_vf_entry \
   -Wl,--section-start=.entry=$BASE -Wl,-Ttext=$(printf '0x%X' $((BASE + 0x40))) \
-  -o "$OUT/vfile.elf" $SRC "$ROOT/tools/xflac/libc_min.c" -lgcc
+  -o "$OUT/vfile.elf" $SRC "$ROOT/tools/xflac/vfstack.S" "$ROOT/tools/xflac/libc_min.c" -lgcc
 "$SH/sh-elf-objcopy" -O binary -j .entry -j .text -j .rodata -j .data "$OUT/vfile.elf" "$OUT/vfile.bin"
 "$SH/sh-elf-nm" "$OUT/vfile.elf" | grep -E " _(vf_|o_|S$|neg|end$)" > "$OUT/vfile.syms"
 "$SH/sh-elf-size" "$OUT/vfile.elf"

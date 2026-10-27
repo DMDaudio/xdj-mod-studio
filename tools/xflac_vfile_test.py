@@ -9,7 +9,9 @@ mono/44.1k FLACs made by ffmpeg from a real track:
     data == ffmpeg's raw PCM decode (s16le / s24le), byte for byte
   * 200 random seek+read pairs (unaligned offsets, across the header)
     == the same slices of the reference
-  * 96 kHz FLAC is NOT virtualised (passes through as the raw file)
+  * hi-res FLAC (96 kHz) becomes a 48 kHz WAV (2:1 low-pass decimation;
+    2026-10-25: passing it through raw froze the deck -- its WAV parser
+    got FLAC bytes); 32 kHz (unsupported) becomes an EMPTY file
 """
 import os
 import random
@@ -81,9 +83,23 @@ def main():
         ok &= hdr_ok and whole and seeks
     f96 = os.path.join(tmp, "hi.flac")
     ff(["-ss", "60", "-t", "2", "-i", SRC, "-ar", "96000", "-sample_fmt", "s16", f96])
-    passthru = run(f96) == open(f96, "rb").read()
-    print(f"96 kHz: passed through untouched: {passthru}")
-    ok &= passthru
+    import numpy as np
+    v = run(f96)
+    rate = struct.unpack_from("<I", v, 24)[0] if v[:4] == b"RIFF" else 0
+    ref = subprocess.run(["ffmpeg", "-v", "error", "-i", f96, "-ar", "48000",
+                          "-f", "s16le", "-"], capture_output=True).stdout
+    i = v.find(b"data") + 8
+    x = np.frombuffer(v[i:i + len(ref) // 2 * 2], "<i2").astype(float)
+    y = np.frombuffer(ref, "<i2")[:len(x)].astype(float)
+    err = np.sqrt(np.mean((x - y) ** 2)) / max(1.0, np.sqrt(np.mean(y ** 2)))
+    good = rate == 48000 and abs(len(v) - i - len(ref)) <= 8 and err < 0.01
+    print(f"96 kHz -> {rate} Hz WAV, rel. error vs ffmpeg {err:.4f}: {'ok' if good else 'BAD'}")
+    ok &= good
+    f32 = os.path.join(tmp, "lo.flac")
+    ff(["-ss", "60", "-t", "1", "-i", SRC, "-ar", "32000", "-sample_fmt", "s16", f32])
+    empty = run(f32) == b""
+    print(f"32 kHz (unsupported): served as an empty file: {empty}")
+    ok &= empty
     print("RESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

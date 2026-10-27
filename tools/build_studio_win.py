@@ -109,7 +109,7 @@ def main():
     shutil.copytree(os.path.join(ROOT, "prebuilt", "deck"), os.path.join(repo, "build"))
     # theme-switch layout (tables come from the user's firmware, fwhome.py)
     with open(os.path.join(repo, "build", "themesw", "layout.txt"), "w") as f:
-        f.write("0x9770000 0x9776000\n")
+        f.write("0x9770000 0x9779000\n")
     os.makedirs(os.path.join(repo, "work", "tic6x"))
     shutil.copy(os.path.join(NAT, "objdump.exe"), os.path.join(repo, "work", "tic6x"))
     shutil.copy(os.path.join(NAT, "_c6xcore.dll"), os.path.join(repo, "emu", "c6x"))

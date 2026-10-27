@@ -60,13 +60,17 @@ static u32 hash_preview(void)
 static u32 find_cue(u32 n)
 {
     u32 ctx = R32(CTX_TAB);
-    if (!ctx || R32(ctx + PCOB_OFF) != TAG_PCOB || R16(ctx + PCOB_OFF + 0x0E) != 1)
+    /* 2026-10-25 LINK guard: the ANLZ context is shared with the Pro DJ Link
+     * server (a linked deck loading from this deck's stick): aligned RAM only */
+    if ((ctx & 3) || ctx < 0x08000000u || ctx >= 0x0FFF0000u)
+        return 0;
+    if (R32(ctx + PCOB_OFF) != TAG_PCOB || R16(ctx + PCOB_OFF + 0x0E) != 1)
         return 0;
     u32 total = R16(ctx + PCOB_OFF + 0x12), seen = 0;
     if (total > 8) total = 8;
     for (u32 g = ctx + PCOB_OFF + 0x20; seen < total && g < ctx + PCOB_OFF + 0x40; g += 8) {
         u32 cnt = R32(g), e = R32(g + 4);
-        if (!cnt || cnt > 8 || e < 0x08000000u || e >= 0x10000000u) break;
+        if (!cnt || cnt > 8 || (e & 1) || e < 0x08000000u || e + cnt * 0x40 > 0x10000000u) break;
         for (u32 k = 0; k < cnt; k++, e += 0x40)
             if (R16(e + 0x0E) == n) return e;
         seen += cnt;

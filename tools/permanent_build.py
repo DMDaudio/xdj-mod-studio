@@ -14,7 +14,7 @@ EXPERIMENTAL: bake the mods into an update file ("permanent mode").
 What it does, from the user's own official XDJ-700 v1.15 update file:
   * decodes the main firmware block and applies, at the same addresses the
     RAM installers use: overview waveform (mode), key/stem version
-    switching, the MY SETTINGS rows and the PERFORM pads -- by running each
+    switching, the UTILITY settings rows and the PERFORM pads -- by running each
     mod's own emulator installer against the firmware image instead of
     live memory;
   * --extras: mods whose code lives in RAM OUTSIDE the firmware image
@@ -446,8 +446,8 @@ def apply_mods(mem, mode="rgb", versions=True, pads=True, log=print,
         for a, b in VR.plan():
             mem.w8(a, b)
         log("key/stem version switching")
-    MS.install(mem)
-    log("MY SETTINGS rows")
+    # 1.0: the mod settings live in the stock UTILITY list (extra
+    # "utility", always baked below); no MY SETTINGS rows
     if pads:
         import perform_pads as PP
         PP.install(mem)
@@ -456,6 +456,8 @@ def apply_mods(mem, mode="rgb", versions=True, pads=True, log=print,
             # the HOT CUE re-tap reads hc_next at HC_BASE+4: power-on RAM
             # is not guaranteed zero, so give it the zero it expects
             mem.region(PP.HC_BASE, PP.HC_BASE + 16, "hot cue entry table (zero)")
+    if isinstance(mem, SplitMem) and "utility" not in extras:
+        extras = tuple(extras) + ("utility",)    # the only settings menu
     bad = [e for e in extras if e not in BAKERS]
     if bad:
         raise SystemExit(f"REFUSED: unknown extra(s) {bad}; known: {list(BAKERS)}")
@@ -648,7 +650,7 @@ def emu_check(upd, steps=6_000_000_000, log=print):
               ("audio read hook as built (versions / stems / stock)",
                m.mem.r32(VR.HOOK) == struct.unpack_from("<I", dec, VR.HOOK - BASE)[0]
                in (VR.VCAVE, VR.FREAD, extras.get("stems", {}).get("sm_fread"))),
-              ("MY SETTINGS hooks", all(m.mem.r32(p) == n for p, o, n in MS.hooks()))]
+              ("MY SETTINGS left stock", all(m.mem.r32(p) == o for p, o, n in MS.hooks()))]
     if "centre" in extras:
         checks.append(("centre colour hook", m.mem.r32(RD.POOL) == RD.DCAVE))
     else:

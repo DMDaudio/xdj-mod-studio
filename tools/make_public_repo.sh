@@ -41,7 +41,7 @@ for f in phasemeter/pm.bin phasemeter/pm.syms hotcue8/hc.bin hotcue8/hc.syms \
          themesw/ts.bin themesw/ts.syms xflac/vfile.bin xflac/vfile.syms \
          stems/sm.bin stems/sm.syms keyshift/ksh.bin keyshift/ksh.syms \
          keyshift/ks.bin keyshift/ks.syms centre/cw.bin centre/cw.syms \
-         utility/ut.bin utility/ut.syms; do
+         utility/ut.bin utility/ut.syms xflac_flac/vfile.bin xflac_flac/vfile.syms; do
   [ -f "build/$f" ] || { echo "ERROR: build/$f missing (build the deck code first)"; exit 1; }
   mkdir -p "$DEST/prebuilt/deck/$(dirname "$f")"
   cp -p "build/$f" "$DEST/prebuilt/deck/$f"

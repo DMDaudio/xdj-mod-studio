@@ -65,16 +65,23 @@ class Intc:
         g, b = divmod(e, 32)
         if g > 3:
             return
-        self.flag[g] |= 1 << b
-        cpu = self.dev.cpu
-        for intn, sel in self.mux.items():
-            if sel == e:
-                cpu.c["ifr"] |= 1 << intn
-        # combined event g (events 0..3) when an unmasked flag is set
-        if e >= 4 and not (self.mask[g] >> b & 1):
+        with self.dev.irq_lock:          # play mode: two threads raise events
+            self.flag[g] |= 1 << b
+            cpu = self.dev.cpu
+            m = 0
             for intn, sel in self.mux.items():
-                if sel == g:
-                    cpu.c["ifr"] |= 1 << intn
+                if sel == e:
+                    m |= 1 << intn
+            # combined event g (events 0..3) when an unmasked flag is set
+            if e >= 4 and not (self.mask[g] >> b & 1):
+                for intn, sel in self.mux.items():
+                    if sel == g:
+                        m |= 1 << intn
+            if m:
+                if hasattr(cpu, "ifr_or"):
+                    cpu.ifr_or(m)            # atomic vs the C core's own updates
+                else:
+                    cpu.c["ifr"] |= m
 
 
 class Edma3:

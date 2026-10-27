@@ -142,6 +142,9 @@ def end_shared():
         h.real_close()
 
 
+_PINNED = [""]            # serial of the deck this process talks to
+
+
 def open_deck(vid, pid, usage=None):
     global OPEN_TIME, OPENS, _SHARED_H
     shared = os.environ.get("XDJ_SHARE_SESSION") == "1"
@@ -155,15 +158,27 @@ def open_deck(vid, pid, usage=None):
     _stamp()
     OPEN_TIME = time.time()
     OPENS += 1
-    if usage is None:
-        h = hid.Device(vid, pid)
+    # 2026-10-25 (tester with two XDJ-700s on one PC): every tool used to
+    # open the FIRST matching device, so one install could land half on
+    # each deck. Now: exactly one deck, pinned by serial for the whole
+    # process (XDJ_DECK_SERIAL picks one when several are connected).
+    devs = [d for d in hid.enumerate(vid, pid)
+            if usage is None or d.get("usage") == usage]
+    want = os.environ.get("XDJ_DECK_SERIAL") or _PINNED[0]
+    if want:
+        devs = [d for d in devs if (d.get("serial_number") or "") == want]
+        if not devs:
+            raise IOError(f"deck {want} is not connected")
     else:
-        for d in hid.enumerate(vid, pid):
-            if d["usage"] == usage:
-                h = hid.Device(path=d["path"])
-                break
-        else:
-            raise IOError(f"no interface with usage {usage:#x}")
+        sers = sorted({d.get("serial_number") or "" for d in devs})
+        if len(sers) > 1:
+            raise IOError("more than one deck is connected (" + ", ".join(sers) +
+                          "): plug in one deck at a time")
+    if not devs:
+        raise IOError(f"no interface with usage {usage:#x}" if usage is not None
+                      else "no deck connected")
+    _PINNED[0] = devs[0].get("serial_number") or ""
+    h = hid.Device(path=devs[0]["path"])
     h.nonblocking = True
     _close = h.close
 

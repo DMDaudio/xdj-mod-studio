@@ -51,7 +51,7 @@ import vredirect as VR
 import aafont
 
 PC0 = RO.CAVE + 0x3600              # 0x081DBF00 (image zero run -> 0x081E03EB)
-PDRAW = PC0 + 0x5E0  # 0x540 -> 0x5C0: swipe code (2026-10-12); -> 0x5E0 stale-latch fix (2026-10-19)
+PDRAW = PC0 + 0x5C8  # 0x540 -> 0x5C0: swipe code (2026-10-12); -> 0x5E0 stale-latch fix (2026-10-19); -> 0x5C8: light-ink guards in fillrect/drawaa (2026-10-26) eat the hook gap
 # 2026-10-17: incremental BJ paint (+~180 B) -> all units from KSSTEP on
 # shifted +0xB0 (cave zero run reaches PC0+0x44EB, still clear).
 KSDRAW = PC0 + 0x11F0                   # KEY SHIFT panel (own unit, calls DRAW)
@@ -71,6 +71,11 @@ FONTK = PC0 + 0x37A8                # key-name font (condensed bold 13-px)
 # the tab/key tables come out ~310 B bigger each (2802 / 3325 B vs 2433 /
 # 2920 on a Mac) -- 2026-10-20 a Windows install hit FONTT's old limit
 PEND = PC0 + 0x44E8
+PDKW = PST + 56                    # u32: &lt_pdk (light add-on's ink flip,
+                                    # r2 -> r2, r4-r7 preserved). Default =
+                                    # PDKSTUB (bare rts: no flip); the
+                                    # LIGHT installer re-arms it
+PDKSTUB = PC0 + 0x11EC             # rts;nop in the 4-byte gap kq..KSDRAW
 ZERO_END = 0x081E03EB               # the image zero run holding the cave
 assert PEND <= ZERO_END, hex(PEND)
 HCPAGE = PMASK + 2                  # u8 hot cue page (tools/hotcue8 writes)
@@ -1668,6 +1673,11 @@ drawaa:                     ; r4 x, r5 y, r6 string, r7 colour, font [PFONT]
   mov.l r12,@-r15
   mov.l r13,@-r15
   mov.l r14,@-r15
+  mov.l @({PDKW:#x},pc),r0  ; light theme: neutral ink flips through the
+  mov.l @r0,r0              ; armed word ([PDKW] -> lt_pdk, r2 in/out, or a
+  jsr @r0                   ; bare rts stub when the light add-on is absent;
+  mov r7,r2                 ; delay slot hands it the ink (r0-r3 dead here)
+  mov r2,r7
   mov r4,r8                 ; pen x
   mov r6,r9                 ; string
   mov.l @({MASK:#x},pc),r11
@@ -1921,13 +1931,16 @@ pxaddr:                     ; r4 x, r5 y -> r0 pixel pointer (r0, r1)
 fillrect:                   ; r4 x r5 y r6 w r7 h, colour [PCOL]
   sts.l pr,@-r15
   mov.l r6,@-r15
+  mov.l @({PCOL:#x},pc),r2   ; ink first: the light flip ([PDKW] -> lt_pdk,
+  mov.l @r2,r2               ; r2 in/out, keeps r4-r7) runs while only the
+  mov.l @({PDKW:#x},pc),r0   ; stack and r0-r3 are live; pxaddr touches
+  mov.l @r0,r0               ; only r0/r1, so the colour stays in r2
+  jsr @r0
+  mov.l @r15+,r6             ; delay slot: pop w around the flip
   bsr pxaddr
   nop
-  mov.l @r15+,r6
   mov.l @({PSTR:#x},pc),r1
   mov.l @r1,r1
-  mov.l @({PCOL:#x},pc),r2
-  mov.l @r2,r2
 frr:
   mov r0,r3
   mov r6,r5
@@ -2922,12 +2935,13 @@ def blobs():
     assert FONTK + len(fk) <= PEND, len(fk)
     init = struct.pack("<II", 0, 0) + struct.pack("<IIII", 0, 0, 800, 0)
     init += b"\0" * (64 - len(init))    # through PST+63: PBUSY starts clear
+    init = init[:56] + struct.pack("<I", PDKSTUB) + init[60:]
     assert PDATA + len(_DATA) <= TRKKEY and TRKKEY + len(tk) <= PMASK, len(tk)
     return [(PC0, h), (PDRAW, d), (KSSTEP, st), (HCSW, hs), (RTKEEP, rk), (KQTAB, kq), (KSDRAW, k),
             (TRKKEY, tk),
             (PDATA, _DATA), (PST, init), (RTKEY, b"\0\0"),
             (PMASK, b"\0\0"), (PADART, art),
-            (FONTP, fp), (FONTT, ft), (FONTK, fk)]
+            (FONTP, fp), (FONTT, ft), (FONTK, fk), (PDKSTUB, b"\x0b\x00\x09\x00")]
 
 
 def patches():

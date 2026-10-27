@@ -46,7 +46,7 @@ struct hdr {
     u32 nswitch, hash_off, chunk, nskipped, tbits_off;
 };
 
-#define MAXS 2048
+#define MAXS 4096   /* 2026-10-26: light makes S ~3400 colours */
 static u16 frm[MAXS], to[MAXS], stk[MAXS];
 static u32 bits[2048];                  /* 65536-bit "colour is in FROM" */
 /* 2026-10-18 diag: start address of the first 32 chunks the stock-
@@ -105,12 +105,50 @@ static inline u32 find(u32 n, u16 v)     /* index of v in frm (present) */
 
 #define IN(v) (bits[(v) >> 5] & (1u << ((v) & 31)))
 
+/* 2026-10-25 (deck: "themes way too long to load"): per pixel the old code
+ * did two binary searches (~11 steps each) over ~1.5 M artwork pixels. Two
+ * direct 64K lookup tables (colour -> target colour, colour -> stock
+ * colour, 256 KB) make it one load per pixel. They live in deck RAM that is
+ * zero in every state (0x09836000..0x0996D000, measured on the deck:
+ * CLAUDE.md sec. 77; stems end 0x098423F0, centre colours start 0x098A0000).
+ * Claimed only if the whole area reads zero the first time; otherwise the
+ * binary search is used as before. */
+#define TS_MAP 0x09850000u
+#define TOMAP ((volatile u16 *)TS_MAP)
+#define STMAP ((volatile u16 *)(TS_MAP + 0x20000u))
+static u32 map_state;                   /* 0 unchecked, 1 ours, 2 in use */
+u32 ts_maps_used;                       /* diagnostic: switches via maps */
+
+static int maps(u32 n)
+{
+    u32 i;
+    if (map_state == 0) {
+        const volatile u32 *w = (const volatile u32 *)TS_MAP;
+        map_state = 1;
+        for (i = 0; i < 0x40000u / 4; i++)
+            if (w[i]) { map_state = 2; break; }
+    }
+    if (map_state != 1)
+        return 0;
+    for (i = 0; i < 65536; i++) {
+        TOMAP[i] = (u16)i;
+        STMAP[i] = (u16)i;
+    }
+    for (i = 0; i < n; i++) {
+        TOMAP[frm[i]] = to[i];
+        STMAP[frm[i]] = stk[i];
+    }
+    ts_maps_used++;
+    return 1;
+}
+
 static void recolour(struct hdr *h)
 {
     const u32 *reg = (const u32 *)((u8 *)h + h->reg_off);
     const u32 *hash = (const u32 *)((u8 *)h + h->hash_off);
     const u8 *tb = (const u8 *)h + h->tbits_off;
     u32 n = h->ns, r, c = 0;
+    int fast = maps(n);
     for (r = 0; r < h->nreg; r++) {
         u16 *p0 = (u16 *)reg[2 * r], *end = p0 + reg[2 * r + 1];
         while (p0 < end) {
@@ -124,17 +162,27 @@ static void recolour(struct hdr *h)
                 continue;
             }
             c++;
-            for (p = p0; p < e; p++) {      /* fingerprint in stock colours */
-                u16 v = *p;
-                if (IN(v))
-                    v = stk[find(n, v)];
-                hv = (hv ^ v) * 0x01000193u;
-            }
-            if (hv == *hash++) {
+            if (fast) {
+                for (p = p0; p < e; p++)    /* fingerprint in stock colours */
+                    hv = (hv ^ STMAP[*p]) * 0x01000193u;
+            } else {
                 for (p = p0; p < e; p++) {
                     u16 v = *p;
                     if (IN(v))
-                        *p = to[find(n, v)];
+                        v = stk[find(n, v)];
+                    hv = (hv ^ v) * 0x01000193u;
+                }
+            }
+            if (hv == *hash++) {
+                if (fast) {
+                    for (p = p0; p < e; p++)
+                        *p = TOMAP[*p];
+                } else {
+                    for (p = p0; p < e; p++) {
+                        u16 v = *p;
+                        if (IN(v))
+                            *p = to[find(n, v)];
+                    }
                 }
                 for (a = (u32)p0 & ~31u; a < (u32)e; a += 32)
                     wb(a);                   /* display/2DG read RAM */

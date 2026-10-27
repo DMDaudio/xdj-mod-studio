@@ -44,6 +44,11 @@ THEMES = {
     'hot-pink':      dict(hue=328.0, sat=1.30, val=1.04, spread=0.45, vivid=0.5, lift=0.1),
     'neon-purple':   dict(hue=286.0, sat=1.45, val=1.08, spread=0.45, vivid=0.5, lift=0.1),
     'slate-gray':    dict(hue=215.0, sat=0.18, val=1.02, spread=0.30),
+    # 2026-10-26: light mode -- every colour's lightness flips (whites and
+    # greys with extra contrast so dim grey text stays readable on white),
+    # hues kept, the 0xF81F transparency key untouched. On the deck it also
+    # needs tools/lighttext (text, waveform window, screen clears).
+    'light':         dict(light=True),
 }
 
 
@@ -213,9 +218,54 @@ def _map_all(h, s, val, spec, acc):
 ACCENT_CALM = (0.55, 0.0, 0.85)   # sat, vivid, val factors for the accent
 
 
+def light_map(c, bg=None):
+    """uint16 RGB565 array -> light-mode colours: neutrals l' = (1-l)^3
+    ("ink": dim grey labels stay readable), colours l' = 1 - 0.88 l with
+    sat x0.8, key 0xF81F kept. bg (bool per colour, optional): neutral
+    BACKGROUND greys (used across huge areas: row stripes, panels) get the
+    plain flip l' = 1 - 0.88 l instead, so they come out light
+    (2026-10-26: BROWSE / UTILITY rows were mid grey)."""
+    c = np.asarray(c, np.uint16)
+    v = c.astype(np.int64)
+    r = ((v >> 11) & 31) / 31.0
+    g = ((v >> 5) & 63) / 63.0
+    b = (v & 31) / 31.0
+    mx, mn = np.maximum(np.maximum(r, g), b), np.minimum(np.minimum(r, g), b)
+    l = (mx + mn) / 2
+    d = mx - mn
+    with np.errstate(divide='ignore', invalid='ignore'):
+        s = np.where(d == 0, 0.0, d / np.where(l > 0.5, 2 - mx - mn, mx + mn + 1e-12))
+    neutral = s < 0.25
+    ink = neutral if bg is None else neutral & ~np.asarray(bg, bool)
+    l2 = np.clip(np.where(ink, (1 - l) ** 4.5, 1 - 0.88 * l), 0, 1)
+    s2 = s * 0.8
+    # hls -> rgb (vectorised colorsys)
+    rc = np.where(d == 0, 0.0, (mx - r) / np.where(d == 0, 1, d))
+    gc = np.where(d == 0, 0.0, (mx - g) / np.where(d == 0, 1, d))
+    bc = np.where(d == 0, 0.0, (mx - b) / np.where(d == 0, 1, d))
+    h = np.where(r == mx, bc - gc, np.where(g == mx, 2.0 + rc - bc, 4.0 + gc - rc))
+    h = np.where(d == 0, 0.0, (h / 6.0) % 1.0)
+    m2 = np.where(l2 <= 0.5, l2 * (1 + s2), l2 + s2 - l2 * s2)
+    m1 = 2 * l2 - m2
+
+    def _v(hue):
+        hue = hue % 1.0
+        return np.where(hue < 1 / 6, m1 + (m2 - m1) * hue * 6,
+               np.where(hue < 0.5, m2,
+               np.where(hue < 2 / 3, m1 + (m2 - m1) * (2 / 3 - hue) * 6, m1)))
+    rr = np.where(s2 == 0, l2, _v(h + 1 / 3))
+    gg = np.where(s2 == 0, l2, _v(h))
+    bb = np.where(s2 == 0, l2, _v(h - 1 / 3))
+    out = (np.round(rr * 31).astype(np.int64) << 11) | (np.round(gg * 63).astype(np.int64) << 5) \
+        | np.round(bb * 31).astype(np.int64)
+    return np.where(c == 0xF81F, 0xF81F, out).astype(np.uint16)
+
+
 def map_colours(c, spec):
     """uint16 RGB565 array -> themed colours (same selection as recolour:
     blue-ish UI colours only, transparency keys untouched)."""
+    if spec and spec.get('light'):
+        return light_map(c)
     c = np.asarray(c, np.uint16)
     v16 = c.astype(np.uint32)
     r = (((v16 >> 11) & 0x1F) * 255 // 31).astype(np.float32)

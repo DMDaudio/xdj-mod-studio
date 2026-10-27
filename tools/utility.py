@@ -10,9 +10,9 @@ module (tools/utility/ut.c, built by tools/utility/build.sh at UT_BASE)
 holds a 21-record copy: the 16 stock records + MODS, WAVEFORM COLOR, VINYL
 BRAKE LENGTH, HOT CUE GATE, THEME. The firmware reaches the table through
 four literal-pool words; they are pointed at the copy, THEN the count goes
-16 -> 21 (revert: count first). The rows edit the same state bytes as the
-MY SETTINGS rows, so both menus agree; unlike the 7-row MY SETTINGS popup
-UTILITY scrolls, so a linked deck shows every row.
+16 -> 21 (revert: count first). The rows edit the same state bytes the
+old MY SETTINGS rows used (retired in 1.0: UTILITY scrolls, the 7-row
+MY SETTINGS popup could not hold every row on a linked deck).
 """
 import os
 import struct
@@ -100,7 +100,8 @@ def emu():
         mem.w8(a, b)
     for a, b in VR.plan():
         mem.w8(a, b)
-    MS.install(mem)
+    # 1.0: no MY SETTINGS rows on the deck -- UTILITY alone (state bytes in
+    # the zeroed MS area, as on a fresh deck)
     themes = bool(os.environ.get("THEMES"))
     if themes:                              # theme switching as the app installs it
         from emu.ui import EmuApp

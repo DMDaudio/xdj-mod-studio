@@ -62,6 +62,12 @@ SAMPLE_RATE = 44100
 # TIME handshake (SH side; all verified by forcing in emu_track_loaded.pkl):
 SH_POS = 0x09D246E0    # SH position word (75 Hz units)
 POSL = 0x0C0E6D1C      # live time-struct position (150 Hz = 2x SH_POS);
+# 2026-10-25 DECK READING (tools/clock_hunt.py, stock deck playing, tempo
+# +10%): the word that counts on silicon is POSL-4 = 0x0C0E6D18 (165/s at
+# +10% = track position in 1/150 s, follows the tempo); 0x0C0E6D1C stayed
+# 68344 (= 455 s: the track length, very likely). The phase meter reads
+# POS150; the model advances both so older emulator behaviour is kept.
+POS150 = 0x0C0E6D18
                        # what the time digits + the phase meter read. Frozen
                        # on a real deck's SH_POS twin, driven there by the DSP
 POS_DIV = 588          # 44100 Hz samples -> 75 Hz SH units (150/s POSL)
@@ -210,6 +216,7 @@ class HleDsp:
                     try:
                         mem.w32(SH_POS, 0)
                         mem.w32(POSL, 0)
+                        mem.w32(POS150, 0)
                     except Exception:
                         pass
                     return
@@ -225,6 +232,7 @@ class HleDsp:
                     try:
                         mem.w32(SH_POS, want)
                         mem.w32(POSL, (want * 2) & 0xFFFFFFFF)
+                        mem.w32(POS150, (want * 2) & 0xFFFFFFFF)
                     except Exception:
                         pass
         except Exception:

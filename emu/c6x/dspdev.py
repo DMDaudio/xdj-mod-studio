@@ -19,6 +19,7 @@ HPIC bits (UHPI): 0 HWOB, 1 DSPINT (host->DSP), 2 HINT (DSP->host),
   DSPINT=1 clears it, HINT=1 sets it.
 """
 import os
+import threading
 
 from .bus import DspBus
 from .cpu import Cpu, Halt
@@ -68,11 +69,12 @@ class Uhpi:
 
     def write(self, off, n, v):
         if off == 0x30:
-            if v & 2:
-                self.dev.hpic &= ~2            # DSP acknowledges DSPINT
-            if v & 4:
-                self.dev.hpic |= 4             # DSP raises HINT to the host
-            self.dev.hpic = (self.dev.hpic & 0x6) | (v & ~0x6 & 0xFFFF)
+            with self.dev.irq_lock:
+                if v & 2:
+                    self.dev.hpic &= ~2            # DSP acknowledges DSPINT
+                if v & 4:
+                    self.dev.hpic |= 4             # DSP raises HINT to the host
+                self.dev.hpic = (self.dev.hpic & 0x6) | (v & ~0x6 & 0xFFFF)
             return
         self.dev.uhpi_regs[off] = v
 
@@ -226,10 +228,45 @@ class DspDevice:
         self.cycles = 0
         self._acc = {}                # byte-wise host accesses being assembled
         self.log = []
+        # play mode (XDJ_PLAY=1 or XDJ_DSP_THREAD=1): the DSP runs on its own
+        # thread, in parallel with the SH (as two real chips do). The SH
+        # side only queues the DSP time it owes; the worker works it off in
+        # chunks. Not cycle-exact (the DSP may trail the SH by up to
+        # max_lag cycles; the SH waits beyond that). Exact mode = default.
+        # irq_lock guards state both threads change (interrupt flags, HPIC);
+        # run_lock is held by the worker while it executes a chunk and by
+        # the SH side for the rare things that must not overlap a running
+        # core (code rewrite, reset, snapshot).
+        self.irq_lock = threading.RLock()
+        self.run_lock = threading.RLock()
+        self.threaded = os.environ.get(
+            "XDJ_DSP_THREAD", "1" if os.environ.get("XDJ_PLAY") == "1" else "0") == "1"
+        self.max_lag = int(os.environ.get("XDJ_DSP_MAXLAG", "3000000"))
+        self._cv = threading.Condition()
+        self._owed = 0
+        self._thr = None
+        self._stop = False
+        self._run_since = 0           # DSP cycles since boot (threading waits for boot)
 
     # ---------------------------------------------------------- host side
     def _word(self, a):
         return self.bus.read(a & ~3, 4)
+
+    # HPIA: while the SH fast core runs with cs6_fast it OWNS the address
+    # latch (word stores land only in its mirror, Core.cs6_addr); every
+    # Python reader -- HPID crossings, the DMAC bulk path that downloads
+    # the boot image -- must see that value, so the property reads through.
+    @property
+    def hpia(self):
+        m = self.__dict__.get("_cs6_mirror")
+        return m.cs6_addr if m is not None else self.__dict__.get("_hpia", 0)
+
+    @hpia.setter
+    def hpia(self, v):
+        self.__dict__["_hpia"] = v & 0xFFFFFFFF
+        m = self.__dict__.get("_cs6_mirror")
+        if m is not None:
+            m.cs6_addr = v & 0xFFFFFFFF
 
     def _hpia_set(self, v):
         """HPIA changed on the Python side (crossings, DMAC/bulk paths);
@@ -265,13 +302,14 @@ class DspDevice:
             v = (val & ((1 << (8 * size)) - 1)) << sh
             low = v & 0xFFFF
             self.ev("hpic-w", hex(low))
-            if low & 2 and not (self.hpic & 2):
-                self.hpic |= 2                  # host -> DSP interrupt
-                self._dspint()
-            if low & 4:
-                self.hpic &= ~4                 # host clears HINT
-            keep = 0x6
-            self.hpic = (self.hpic & keep) | (low & ~keep & 0xFFFF)
+            with self.irq_lock:
+                if low & 2 and not (self.hpic & 2):
+                    self.hpic |= 2                  # host -> DSP interrupt
+                    self._dspint()
+                if low & 4:
+                    self.hpic &= ~4                 # host clears HINT
+                keep = 0x6
+                self.hpic = (self.hpic & keep) | (low & ~keep & 0xFFFF)
             return
         if 0x40000 <= off < 0x40004:
             sh = 8 * (off - 0x40000)
@@ -303,12 +341,14 @@ class DspDevice:
         self.bus.write(a, 4, v)
         pg = a >> 16
         if pg in self.decoded:        # code in this page changed: re-decode
-            self.decoded.discard(pg)
-            if hasattr(self.cpu, "drop_code"):
-                self.cpu.drop_code(pg << 16, (pg + 1) << 16)
-            for x in [x for x in self.cpu.prog if x >> 16 == pg]:
-                self.cpu.prog.pop(x, None)
-                self.cpu.ops.pop(x, None)
+            # never under a running core (play mode)
+            with self.run_lock:
+                self.decoded.discard(pg)
+                if hasattr(self.cpu, "drop_code"):
+                    self.cpu.drop_code(pg << 16, (pg + 1) << 16)
+                for x in [x for x in self.cpu.prog if x >> 16 == pg]:
+                    self.cpu.prog.pop(x, None)
+                    self.cpu.ops.pop(x, None)
 
     def busy_pin(self):
         """SH 0xA405016C bit0 = the DSP's HPI interrupt line HINT (active
@@ -347,6 +387,14 @@ class DspDevice:
     def reset(self):
         """DSP held in reset again (SH retry): core stops, GPIO outputs and
         HPI state return to reset values; memory keeps its contents."""
+        with self.run_lock:
+            with self._cv:
+                self._owed = 0
+                self._cv.notify_all()
+            self._reset_locked()
+
+    def _reset_locked(self):
+        self._run_since = 0
         self.in_reset = True
         self.running = False
         self.cpu = make_cpu(self.bus)
@@ -433,7 +481,67 @@ class DspDevice:
             self.credit += bonus - n
             n = bonus
         if n > 0:
-            self._run(n)
+            if self._thread_ok():
+                self._queue(n)
+            else:
+                self._run(n)
+
+    # ---------------------------------------------------------- play mode
+    BOOT_SETTLE = 200_000_000          # DSP cycles of lock-step after boot
+
+    def _thread_ok(self):
+        return (self.threaded and self.running and not self.in_reset and not self.error
+                and self._run_since >= self.BOOT_SETTLE)
+
+    def _queue(self, n):
+        if self._thr is None or not self._thr.is_alive():
+            self._stop = False
+            self._thr = threading.Thread(target=self._worker, name="dsp", daemon=True)
+            self._thr.start()
+        with self._cv:
+            self._owed += n
+            self._cv.notify_all()
+            while self._owed > self.max_lag and self._thr.is_alive() and not self.error:
+                self._cv.wait(0.05)        # back-pressure: the SH waits for the DSP
+
+    CHUNK = 60_000
+
+    def _worker(self):
+        while True:
+            with self._cv:
+                while self._owed <= 0 and not self._stop:
+                    self._cv.wait(0.1)
+                if self._stop:
+                    return
+                k = min(self._owed, self.CHUNK)
+            with self.run_lock:
+                if self._thread_ok():
+                    self._run(k)
+                    done = k
+                else:
+                    done = 0
+            with self._cv:
+                self._owed -= done if done else self._owed
+                self._cv.notify_all()
+
+    def drain(self):
+        """play mode: run whatever the DSP still owes, now, on this thread
+        (callers hold run_lock to keep the worker out). No-op otherwise."""
+        with self.run_lock:
+            with self._cv:
+                k, self._owed = self._owed, 0
+                self._cv.notify_all()
+            if k > 0 and self.running and not self.in_reset and not self.error:
+                self._run(k)
+
+    def stop_thread(self):
+        if self._thr is not None:
+            self.drain()
+            with self._cv:
+                self._stop = True
+                self._cv.notify_all()
+            self._thr.join(timeout=5)
+            self._thr = None
 
     def sync(self, n=None):
         """run the DSP now (before the SH sees a DSP-driven signal). Never
@@ -453,6 +561,7 @@ class DspDevice:
 
     def _run(self, n):
         cpu = self.cpu
+        self._run_since += n
         try:
             while n > 0:
                 k = n
@@ -533,6 +642,14 @@ def _quiesce(d, limit=50_000_000):
 
 
 def state(d):
+    with d.run_lock:                       # play mode: worker paused, owed run
+        d.drain()
+        return _state(d)
+
+
+def _state(d):
+    if hasattr(d.cpu, "settle"):
+        d.cpu.settle()                     # a frozen delay call -> real state
     if d.running and not d.error:
         if not _quiesce(d):
             raise RuntimeError("DSP never quiet enough to snapshot")
@@ -584,6 +701,8 @@ def restore(d, st):
     d._hpia_set(st["hpia"])                # pushes into the fast-core mirror
     d.spi_tx = list(st["spi_tx"])
     d.sh_seen = None                  # re-anchored to the SH clock on first use
+    if d.running and not d.in_reset:  # a booted DSP: play mode may thread at once
+        d._run_since = d.BOOT_SETTLE
     if "intc" in st:
         f, mk, mux, rg = st["intc"]
         d.intc.flag, d.intc.mask, d.intc.mux, d.intc.regs = list(f), list(mk), dict(mux), dict(rg)

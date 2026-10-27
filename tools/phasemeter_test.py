@@ -32,7 +32,7 @@ from ghosttap_emu import fb_png
 
 OUT = "build/phasemeter"
 HOOK = 0x08C92E20
-POSL = 0x0C0E6D1C    # 150/s, what pm.c reads and what the HLE advances
+POSL = 0x0C0E6D18    # 150/s track position (deck-read 2026-10-25), what pm.c reads
 SH_POS = 0x09D246E0  # 75/s; a write > 1 s off seeks the HLE play clock
 MODE = 0x0B6C4264    # 5 = playing, 3 = paused (HLE play clock gate)
 PREVIEW = 0x0BA3BCCC  # pm snapshots the grid when this changes
@@ -112,6 +112,16 @@ def main():
     mem.w8(s["pm_mode"], 1)
     mem.w32(HOOK, base)
     print(f"cave {base:#x}..{end:#x}, chained prev {prev:#x}")
+    # count the stock meter's 216x20 row pastes that reach the 2DG
+    from emu import tdg as TDGM
+    pastes = [0]
+    _qt = TDGM.TDG.quad_tex
+
+    def quad_tex(self, flags, sx, sy, sw, sh, pts):
+        if (sw, sh) == (216, 20) and pts[0][0] == 258:
+            pastes[0] += 1
+        return _qt(self, flags, sx, sy, sw, sh, pts)
+    TDGM.TDG.quad_tex = quad_tex
     mem.w32(MODE, 5)                      # playing
     want_grid = install_grid(mem)
     mem.w32(PREVIEW, mem.r32(PREVIEW) ^ 1)  # force a grid snapshot
@@ -150,6 +160,38 @@ def main():
         ok &= match and d1 > d0
         print(f"POSL {posl} ({ms} ms): draws +{d1-d0}, "
               f"{'MATCH' if match else 'DIFF'} got {sorted(got_n.items())} want {sorted(want.items())}")
+    # broken / changing track structure (2026-10-25 deck: deck 1 froze twice
+    # while deck 2 played a track served from deck 1's stick over LINK -- the
+    # shared ANLZ context gets rewritten under the meter). pm must reject
+    # wild pointers and half-written grids, never fault, and recover.
+    CTX_TAB, PQTZ_OFF = 0x09826BE4, 0xD7C
+    q = mem.r32(CTX_TAB) + PQTZ_OFF
+    good_ptr, good_n = mem.r32(q + 0x18), mem.r32(q + 0x14)
+    e0, r0 = m.exc_total, mem.r32(s["pm_rejects"])
+    for k, (tag, ptr, n) in enumerate((("wild pointer", 0xFFFFFF00, good_n),
+                                       ("pointer below RAM", 0x00001000, good_n),
+                                       ("half-written grid", 0x0BC00000 + 8 * 600, good_n))):
+        mem.w32(q + 0x18, ptr)
+        mem.w32(q + 0x14, n)
+        if tag == "half-written grid":          # times stop rising mid-way
+            for i in range(10, 20):
+                mem.w32(ptr + 8 * i + 4, 5)
+        mem.w32(PREVIEW, mem.r32(PREVIEW) ^ (0x100 << k))  # a new track
+        d0 = mem.r32(s["pm_draws"])
+        m.cpu.run(limit=20_000_000)
+        rj, n_now = mem.r32(s["pm_rejects"]), mem.r32(s["pm_n"])
+        print(f"{tag}: rejects +{rj - r0}, beats {n_now}, draws +{mem.r32(s['pm_draws']) - d0}, "
+              f"exceptions +{m.exc_total - e0}")
+        ok &= rj > r0 and n_now == 0 and m.exc_total == e0
+        r0 = rj
+    mem.w32(q + 0x18, good_ptr)                # the real grid back
+    mem.w32(q + 0x14, good_n)
+    for i in range(10, 20):                     # undo the corruption above
+        mem.w32(0x0BC00000 + 8 * 600 + 8 * i + 4, int((600 + i) * 60000 / 128.0))
+    m.cpu.run(limit=20_000_000)
+    rec = mem.r32(s["pm_n"]) == good_n
+    print(f"recovered: beats {mem.r32(s['pm_n'])} (want {good_n})")
+    ok &= rec
     # PERFORM screen (2026-10-25 tester: the PERFORM screen showed the stock
     # 4-beat boxes): the same meter 103 px higher, at the same POSL
     mem.dev.panel_frame = panl.build_frame(touch=(705, 37))
@@ -180,10 +222,30 @@ def main():
     m.cpu.run(limit=3_000_000)
     mem.dev.panel_frame = panl.build_frame()
     m.cpu.run(limit=10_000_000)
+    st = mem.r32(s["pm_stripped"])
+    print(f"stock meter row pastes reaching the screen: {pastes[0]}, stripped: {st}")
+    ok &= pastes[0] == 0 and st > 0
+    # MENU (MY SETTINGS popup) over the main screen: covers the meter's right
+    # part only -> must not be painted over either (deck, 2026-10-25)
+    mem.dev.panel_frame = panl.build_frame(keys=["MenuUtility"])
+    m.cpu.run(limit=3_000_000)
+    mem.dev.panel_frame = panl.build_frame()
+    m.cpu.run(limit=30_000_000)
+    d0 = mem.r32(s["pm_draws"])
+    m.cpu.run(limit=30_000_000)
+    d1 = mem.r32(s["pm_draws"])
+    fb_png(m, "screenshots/phasemeter_menu.png")
+    print(f"MENU popup open: draws +{d1 - d0} (want 0)")
+    ok &= d1 == d0
+    mem.dev.panel_frame = panl.build_frame(keys=["MenuUtility"])   # close
+    m.cpu.run(limit=3_000_000)
+    mem.dev.panel_frame = panl.build_frame()
+    m.cpu.run(limit=30_000_000)
     # Browse open: the list covers the meter -> must not be painted over
     mem.dev.panel_frame = panl.build_frame(keys=["Browse"])
     m.cpu.run(limit=3_000_000)
     mem.dev.panel_frame = panl.build_frame()
+    m.cpu.run(limit=20_000_000)               # let the list finish opening
     d0 = mem.r32(s["pm_draws"])
     m.cpu.run(limit=30_000_000)
     d1 = mem.r32(s["pm_draws"])

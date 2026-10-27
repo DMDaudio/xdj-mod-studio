@@ -58,10 +58,16 @@ class TDG:
         self.reg = {}
         self.ssr = 0
         self.lcofs = (0, 0)
+        # the SH C core may own reg 0x00-0xFF + ssr (fastcpu 2DG mirror):
+        # pull() flushes it here, gen tells it to re-adopt after restore()
+        self.pull = None
+        self.gen = 0
         self.unknown = []      # (addr, word) of opcodes not understood
         self.stats = {}
 
     def state(self):
+        if self.pull is not None:
+            self.pull()
         return {"reg": dict(self.reg), "ssr": self.ssr, "lcofs": self.lcofs,
                 "runs": getattr(self, "runs", 0)}
 
@@ -70,6 +76,7 @@ class TDG:
         self.ssr = st["ssr"]
         self.lcofs = tuple(st["lcofs"])
         self.runs = st.get("runs", 0)
+        self.gen += 1
 
     # -- register file --------------------------------------------------------
     def r32(self, off):
@@ -131,6 +138,20 @@ class TDG:
         if xa > xb or ya > yb:
             return
         c = colour & 0xFFFF
+        # 2026-10-26: one strided numpy store when the whole rect sits in
+        # one plain RAM buffer and nobody wants per-row hooks (the Python
+        # row loop was ~480 iterations for every full-screen clear)
+        if getattr(self.mem, "fb_hook", None) is None:
+            a0 = dst + (ya * stride + xa) * 2
+            res = self._u16view(a0, ((yb - ya) * stride + xb - xa + 1) * 2)
+            if res is not None:
+                view, i0, fb = res
+                idx = ((np.arange(ya, yb + 1)[:, None] - ya) * stride
+                       + (np.arange(xa, xb + 1)[None, :] - xa))
+                view[i0 + idx.ravel()] = c
+                if fb:
+                    self.mem.fb_writes += (yb - ya + 1) * (xb - xa + 1) * 2
+                return
         row = bytes([c & 0xFF, c >> 8]) * (xb - xa + 1)
         for yy in range(ya, yb + 1):
             self._write_row(dst + (yy * stride + xa) * 2, row)
@@ -316,6 +337,22 @@ class TDG:
         if not hasattr(self, "dsts"):
             self.dsts = set()
         n = 0
+        # 2026-10-26: the C core runs the list when it can (exact port of the
+        # ops below); it stops BEFORE anything it cannot do and we carry on
+        cx = getattr(self.mem, "tdg_cexec", None)
+        if (cx is not None and getattr(self, "draw_log", None) is None
+                and getattr(self.mem, "fb_hook", None) is None):
+            done, pc, n = cx(self, addr, limit)
+            if done:
+                return
+        self.run_from(pc, n, limit)
+
+    def run_from(self, pc, n, limit=200000):
+        """The Python list interpreter from pc with n ops already used
+        (also where the C core hands over a list it cannot finish)."""
+        rd = lambda a: self.mem.r32(self._phys(a))
+        if not hasattr(self, "dsts"):
+            self.dsts = set()
         while n < limit:
             n += 1
             w = rd(pc)

@@ -972,7 +972,9 @@ class SH7724:
     # matching status flags in bits 6..0; firmware clears a flag by writing
     # 0 to it. Once per 60 Hz frame every enabled event is flagged and
     # LCDCI raised -- the GUI waits on this to know a flip has taken.
-    FRAME_CYC = CPUFREQ // 60
+    # XDJ_LCD_HZ: LCD frame rate (default the deck's 60; lower rates gave no
+    # speed-up in tests -- painting is not paced by frames).
+    FRAME_CYC = CPUFREQ // int(os.environ.get("XDJ_LCD_HZ", "60"))
     LDINTR = 0xFE940468
 
     def _lcdc_tick(self, cyc):

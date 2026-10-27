@@ -672,9 +672,11 @@ def _mvc(i):
             if name in ("ilc", "rilc"):
                 cpu.wr_ctrl(cyc + 3, name, v)        # 4-cycle latency
             elif name == "icr":                      # clear IFR bits
-                cpu.c["ifr"] &= ~v & MASK
+                (cpu.ifr_and(~v & MASK) if hasattr(cpu, "ifr_and") else
+                 cpu.c.__setitem__("ifr", cpu.c["ifr"] & ~v & MASK))
             elif name == "isr":                      # set IFR bits
-                cpu.c["ifr"] |= v
+                (cpu.ifr_or(v) if hasattr(cpu, "ifr_or") else
+                 cpu.c.__setitem__("ifr", cpu.c["ifr"] | v))
             else:
                 cpu.wr_ctrl(cyc, name, v)
         return run

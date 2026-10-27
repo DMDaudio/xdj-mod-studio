@@ -17,6 +17,10 @@ when a stick mounts, so the FLAC->WAV type patch must already be in place.
              read hooks last (fread chains whatever was live: stems /
              versions / stock).
   --revert   everything back to the values it replaced.
+  --no-opus  FLAC only (build/xflac_flac, VF_OPUS=0: 41 KB instead of 140 KB
+             of code, a much shorter install); .opus stays unlisted and the
+             "JPEG" extension entry untouched. Studio uses it unless the
+             library has .opus files.
 """
 import os
 import struct
@@ -41,9 +45,18 @@ STOCK = {"vf_fread_direct": 0x08C61A6C, "vf_seek": 0x08C62E1C, "vf_tell": 0x08C6
          "vf_eof": 0x08C63344, "vf_size": 0x08C71124, "vf_close": 0x08C605F4}
 
 
+NOOPUS = "--no-opus" in sys.argv
+if NOOPUS:
+    OUT = "build/xflac_flac"
+    TYPE_PATCH = {a: v for a, v in TYPE_PATCH.items() if a != 0x08BA9988}
+    EXT_PATCH = {}
+
+
 def build():
     import shbuild
-    shbuild.build("tools/xflac/build_vfile.sh", [f"{OUT}/vfile.bin", f"{OUT}/vfile.syms"])
+    env = dict(os.environ, VF_OPUS="0" if NOOPUS else "1",
+               VF_OUT=os.path.abspath(OUT))
+    shbuild.build("tools/xflac/build_vfile.sh", [f"{OUT}/vfile.bin", f"{OUT}/vfile.syms"], env)
     s = {}
     for line in open(f"{OUT}/vfile.syms"):
         a, _, n = line.split()
@@ -56,7 +69,8 @@ def build():
 
 
 def main():
-    arg = sys.argv[1] if len(sys.argv) > 1 else ""
+    args = [a for a in sys.argv[1:] if a != "--no-opus"]
+    arg = args[0] if args else ""
     img, s = build()
     base, end = s["vf_entry"], s["end"]
     import hid

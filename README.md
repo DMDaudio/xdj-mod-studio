@@ -23,11 +23,10 @@ on and it is completely stock again.
 | --- | --- |
 | RGB and 3-band waveforms | overview strip and centre display |
 | Live key shift | PERFORM › KEY SHIFT, MASTER TEMPO on, tempo stays put |
-| Live themes | from MY SETTINGS; OFF restores the stock colours exactly |
+| Live themes | pick on the deck: UTILITY › THEME; OFF restores the stock colours exactly |
 | Live stems | PERFORM › STEMS mutes vocals / drums / bass / other, heard after ~30 s |
 | Beat jump pads | PERFORM › BEAT JUMP, tap and swipe (1–64 beats) |
-| MY SETTINGS rows | waveform style, mods on/off, theme |
-| UTILITY rows | the same settings at the end of hold-MENU UTILITY (scrolls: every row, also on linked decks) — emulator only so far |
+| Mod settings in UTILITY | hold MENU, end of the list: mods on/off, waveform style, vinyl brake, hot cue gate, theme (hardware-tested) |
 
 **Working in the emulator, not yet tested on a deck.** These run against the
 deck's real firmware in the emulator, so they should work on a real deck,
@@ -37,7 +36,7 @@ but nobody has tried them on one yet:
 | --- | --- |
 | Faster stem mute (beta) | rewrites the audio the deck already buffered; < 1 s in the emulator |
 | Phase meter | this deck's beats; the master row needs link data |
-| Vinyl brake length | MY SETTINGS › [VINYL BRAKE] or UTILITY › VINYL BRAKE LENGTH, 0.5×–15× |
+| Vinyl brake length | UTILITY › VINYL BRAKE LENGTH, 0.5×–15× |
 | 8 hot cues | pages A–C / D–F / G–H |
 | FLAC and Ogg Opus playback | own decoders on the deck |
 

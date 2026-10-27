@@ -10,7 +10,10 @@ BASE=${PM_BASE:-0x09798000}
 mkdir -p "$OUT"
 cd "$ROOT/tools/phasemeter"
 "$ROOT/.venv/bin/python" mklabel.py >/dev/null
-"$SH/sh-elf-gcc" -m4-nofpu -mdiv=call-div1 -ml -O2 -Wall -ffreestanding -fno-builtin \
+TS_DATA=$("$ROOT/.venv/bin/python" -c "
+import sys; sys.path[:0] = ['$ROOT/tools', '$ROOT', '$ROOT/mods']
+import theme_switch as TS; print(hex(TS.TS_DATA))")
+"$SH/sh-elf-gcc" -DTS_DATA=${TS_DATA}u -m4-nofpu -mdiv=call-div1 -ml -O2 -Wall -ffreestanding -fno-builtin \
   -ffunction-sections -fdata-sections -nostdlib -Wl,--gc-sections -Wl,-e,_pm_entry \
   -Wl,--section-start=.entry=$BASE -Wl,-Ttext=$(printf '0x%X' $((BASE + 0x40))) \
   -o "$OUT/pm.elf" pmhook.S pm.c -lgcc

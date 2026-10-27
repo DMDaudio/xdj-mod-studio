@@ -26,19 +26,25 @@ import theme_rev as TR
 
 IMG_BASE = 0x08000000
 TS_BASE = int(os.environ.get("TS_BASE", "0x09770000"), 0)
-TS_DATA = int(os.environ.get("TS_DATA", "0x09776000"), 0)
+TS_DATA = int(os.environ.get("TS_DATA", "0x09779000"), 0)
 TS_END = TS_BASE + 0x20000                 # 0x09790000: hot cues follow
 # never recolour our own code/data caves (waveform, versions, settings,
 # PERFORM pads): CAVE .. end of the PERFORM zero run
 NO_TOUCH = (0x081D8900, 0x081E0400)
 MAGIC = 0x57535458                         # "XTSW"
-CHUNK = 256                                # px per safety fingerprint
+CHUNK = 1024   # px per safety fingerprint (2026-10-26: 256 -> 1024, light makes
+               # almost every chunk fingerprinted; 75 KB -> 19 KB of hashes)
 # The firmware writes a few words INSIDE real artwork at runtime
 # (emulator: 8 KB-stride headers + play-HISTORY text at 0x087E0000..
 # 0x087FC00C, in the middle of the LINK/USB button art). No blanket
 # exclusion (that left LINK unthemed): the 128-px stock fingerprint skips
 # exactly the touched blocks, on the deck too.
 LIVE_DATA = []
+# 2026-10-26 (user: "light mode has some black at the bottom"): the track
+# position bar under the overview is white/light-grey stripes; flipped it
+# became a solid black bar. Its two 504x5 pictures keep their stock colours
+# in every theme (colour themes never touched them: neutral only).
+KEEP_STOCK = [(0x0840AAF0, 0x0840AAF0 + 504 * 5 * 2), (0x083B78A0, 0x083B78A0 + 504 * 5 * 2)]
 
 
 def _steps(radius=8):
@@ -104,7 +110,107 @@ def regions(w):
                     cut.append((x, y))
         spans = cut
     spans = _fill_gaps(w, spans)
+    sprites = _sprite_spans()
+    spans = _no_zero_runs(w, _cut(_union(spans + sprites), [NO_TOUCH] + LIVE_DATA + KEEP_STOCK),
+                          keep=sprites)
     return [(a, (b - a) // 2) for a, b in spans] + own_art()[1]
+
+
+SPRITE_MAP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "mods",
+                          "sprite_map_light.json")
+
+
+def _sprite_spans():
+    """2026-10-26 light theme: every artwork picture the firmware copies to
+    the screen (tools/sprite_log.py; white/grey-only digits and labels the
+    colour detector never sees). Colour themes leave neutral pixels alone,
+    so for them this changes nothing."""
+    import json
+    try:
+        rects = json.load(open(SPRITE_MAP))["rects"]
+    except (OSError, ValueError, KeyError):
+        return []
+    out = []
+    for off, st, sx, sy, w, h in rects:
+        for j in range(h):
+            a = IMG_BASE + off + 2 * ((sy + j) * st + sx)
+            out.append((a, a + 2 * w))
+    return out
+
+
+def _union(spans):
+    merged = []
+    for a, b in sorted(spans):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return merged
+
+
+def _cut(spans, holes):
+    for lo, hi in holes:
+        cut = []
+        for a, b in spans:
+            for x, y in ((a, min(b, lo)), (max(a, hi), b)):
+                if y > x:
+                    cut.append((x, y))
+        spans = cut
+    return spans
+
+
+ZERO_RUN = 256          # px
+LIGHT_BG_PX = 50000     # a neutral used on >= this many px = background (light)
+
+
+def _split_keep(a, b, keep):
+    """[(lo, hi, inside)] covering [a, b): inside-keep pieces flagged"""
+    segs, cur = [], a
+    for k0, k1 in keep:
+        if k1 <= cur or k0 >= b:
+            continue
+        if k0 > cur:
+            segs.append((cur, k0, 0))
+        segs.append((max(cur, k0), min(b, k1), 1))
+        cur = min(b, k1)
+        if cur >= b:
+            break
+    if cur < b:
+        segs.append((cur, b, 0))
+    return segs
+
+
+def _no_zero_runs(w, spans, keep=()):
+    """2026-10-26 light theme: black (0x0000) is a source colour now, and an
+    all-zero stretch may be a working buffer the firmware fills later rather
+    than artwork. Runs of >= ZERO_RUN zero pixels are taken out of the
+    regions (they stay as they are in every theme) -- EXCEPT inside `keep`
+    spans (the sprite rects the firmware demonstrably blits to the screen:
+    artwork by construction, even when a sprite is all black -- 2026-10-26
+    night: the UTILITY popup's black patches)."""
+    out = []
+    keep = _union(sorted(keep))
+    for a, b in spans:
+        for lo, hi, inside in _split_keep(a, b, keep):
+            if inside:
+                out.append((lo, hi))
+                continue
+            s0, s1 = (lo - IMG_BASE) // 2, (hi - IMG_BASE) // 2
+            z = w[s0:s1] == 0
+            if not z.any():
+                out.append((lo, hi))
+                continue
+            edges = np.flatnonzero(np.diff(np.concatenate(([0], z.astype(np.int8), [0]))))
+            cur = s0
+            for i in range(0, len(edges), 2):
+                zs, ze = s0 + edges[i], s0 + edges[i + 1]
+                if ze - zs >= ZERO_RUN:
+                    if zs > cur:
+                        out.append((IMG_BASE + 2 * cur, IMG_BASE + 2 * zs))
+                    cur = ze
+            if s1 > cur:
+                out.append((IMG_BASE + 2 * cur, IMG_BASE + 2 * s1))
+    return out
 
 
 GAP_WIN = 1024          # px
@@ -143,7 +249,35 @@ def _fill_gaps(w, spans):
             merged[-1] = (merged[-1][0], max(merged[-1][1], b))
         else:
             merged.append((a, b))
-    return merged
+    return _bridge(w, merged)
+
+
+BRIDGE_MAX = 0x4000     # bytes
+BRIDGE_DENSITY = 0.60
+
+
+def _bridge(w, spans):
+    """2026-10-25: lit-button sprites (VINYL BRAKE / SYNC lit state, deck
+    photo: stock stripes) sit in small holes BETWEEN detected regions whose
+    1024-px windows fall under GAP_DENSITY because of white text pixels
+    (0x0887F000..0x08880000 = top half of lit VINYL BRAKE). A hole of at most
+    BRIDGE_MAX bytes with art on BOTH sides and >= 60 % themable colours is
+    art too. Unthemable pixels are never changed by the maps anyway."""
+    import themes as T
+    allc = np.arange(65536, dtype=np.uint16)
+    themable = T.map_colours(allc, T.THEMES["crimson-red"]) != allc
+    nt0, nt1 = NO_TOUCH
+    out = [spans[0]]
+    for a, b in spans[1:]:
+        pa, pb = out[-1]
+        g = a - pb
+        s = (pb - IMG_BASE) // 2
+        if (0 < g <= BRIDGE_MAX and not (a > nt0 and pb < nt1)
+                and themable[w[s:s + g // 2]].mean() >= BRIDGE_DENSITY):
+            out[-1] = (pa, b)
+        else:
+            out.append((a, b))
+    return out
 
 
 def fingerprints(w, regs, S):
@@ -188,7 +322,11 @@ def tables(names, w=None):
     changed = np.zeros(len(cols), bool)
     maps = {}
     for n in names:
-        m = T.map_colours(cols, T.THEMES[n])
+        if T.THEMES[n].get("light"):
+            # greys covering huge areas are backgrounds (light), rare ones ink
+            m = T.light_map(cols, bg=cnt[cols] >= LIGHT_BG_PX)
+        else:
+            m = T.map_colours(cols, T.THEMES[n])
         maps[n] = m
         changed |= m != cols
     S = cols[changed]
@@ -298,6 +436,11 @@ def check(names):
     # how close each theme is to the Studio preview (themes.recolour)
     worst = 0.0
     for n, D in zip(names, Ds):
+        if T.THEMES[n].get("light"):
+            got = model_switch(w, regs, S, D)
+            print(f"  {n:14s} {int((got != w).sum()):>9,} px changed (light: no Studio-preview "
+                  f"comparison; tools/light_theme_proto.py is its reference)")
+            continue
         ref = T.recolour(w.copy(), T.THEMES[n])[0]
         got = model_switch(w, regs, S, D)
         ch = (ref != w) & ~own
